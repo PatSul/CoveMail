@@ -68,4 +68,4 @@ cargo run -p cove-native
 
 ## Open Source
 
-Licensed under Apache-2.0. See `LICENSE`.
+Dual-licensed under AGPL-3.0 (for application components) and MIT (for libraries). See `LICENSE`.
