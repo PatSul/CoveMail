@@ -899,6 +899,9 @@ async fn fetch_recent_gmail(
             received_at,
             created_at: now,
             updated_at: now,
+            snoozed_until: None,
+            pinned: false,
+            send_at: None,
         };
 
         messages.push(message);
@@ -1264,6 +1267,9 @@ fn fetch_recent_imap(
             received_at,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            snoozed_until: None,
+            pinned: false,
+            send_at: None,
         });
     }
 
@@ -1523,6 +1529,9 @@ fn parse_ews_messages(account_id: Uuid, folder_path: &str, payload: &str) -> Vec
             received_at,
             created_at: now,
             updated_at: now,
+            snoozed_until: None,
+            pinned: false,
+            send_at: None,
         });
     }
 
@@ -1815,6 +1824,9 @@ fn parse_jmap_messages(
                     received_at,
                     created_at: Utc::now(),
                     updated_at: Utc::now(),
+                    snoozed_until: None,
+                    pinned: false,
+                    send_at: None,
                 }
             })
             .collect();

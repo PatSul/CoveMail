@@ -15,7 +15,7 @@ use cove_storage::Storage;
 use cove_tasks::{TaskService, TaskSettings};
 use anyhow::Context;
 use base64::Engine;
-use chrono::{Duration, Utc};
+use chrono::{Datelike, Duration, Timelike, Utc};
 use eframe::egui;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -109,6 +109,7 @@ enum View {
     Tasks,
     Ai,
     Security,
+    Settings,
 }
 
 struct OAuthDraft {
@@ -192,6 +193,22 @@ struct NativeApp {
     // Notifications
     notification_state: notifications::NotificationState,
     last_notification_check: std::time::Instant,
+
+    // Unified inbox
+    unified_inbox: bool,
+
+    // Command palette
+    show_command_palette: bool,
+    command_query: String,
+
+    // Snooze dialog
+    pending_snooze: Option<Uuid>,
+
+    // Undo send
+    undo_send_message: Option<(cove_core::MailMessage, std::time::Instant)>,
+
+    // Contact autocomplete suggestions
+    contact_suggestions: Vec<cove_core::Contact>,
 }
 impl NativeApp {
     fn initialize() -> anyhow::Result<Self> {
@@ -358,6 +375,12 @@ impl NativeApp {
             pending_attachment_open: None,
             notification_state: notifications::NotificationState::new(),
             last_notification_check: std::time::Instant::now(),
+            unified_inbox: false,
+            show_command_palette: false,
+            command_query: String::new(),
+            pending_snooze: None,
+            undo_send_message: None,
+            contact_suggestions: Vec::new(),
         })
     }
 
@@ -425,6 +448,19 @@ impl NativeApp {
     }
 
     fn load_threads(&mut self) {
+        if self.unified_inbox {
+            match self.runtime.block_on(self.email.list_unified_threads(200, 0)) {
+                Ok(threads) => {
+                    self.threads = threads;
+                    self.selected_thread = self.threads.first().map(|t| t.thread_id.clone());
+                    self.status = format!("Unified inbox: {} threads", self.threads.len());
+                }
+                Err(err) => self.status = format!("unified inbox failed: {err}"),
+            }
+            self.load_thread_messages();
+            return;
+        }
+
         let Some(account) = self.account().cloned() else {
             self.threads.clear();
             return;
@@ -653,18 +689,100 @@ impl NativeApp {
     }
 
     fn search_mail(&mut self) {
-        match self
-            .runtime
-            .block_on(self.storage.search_mail(self.mail_query.trim(), 100))
-        {
-            Ok(result) => {
-                self.selected_thread = None;
-                self.selected_message = result.items.last().map(|message| message.id);
-                self.thread_messages = result.items;
-                self.status = format!("Search returned {} message(s)", self.thread_messages.len());
+        let query = self.mail_query.trim().to_string();
+        // Check for search operators.
+        let has_operators = query.contains(':')
+            && ["from:", "to:", "subject:", "has:", "is:", "before:", "after:", "label:"]
+                .iter()
+                .any(|op| query.to_lowercase().contains(op));
+
+        if has_operators {
+            self.search_with_operators(&query);
+        } else {
+            match self.runtime.block_on(self.storage.search_mail(&query, 100)) {
+                Ok(result) => {
+                    self.selected_thread = None;
+                    self.selected_message = result.items.last().map(|message| message.id);
+                    self.thread_messages = result.items;
+                    self.status = format!("Search returned {} message(s)", self.thread_messages.len());
+                }
+                Err(err) => self.status = format!("search failed: {err}"),
             }
-            Err(err) => self.status = format!("search failed: {err}"),
         }
+    }
+
+    fn search_with_operators(&mut self, query: &str) {
+        let Some(account_id) = self.selected_account else {
+            self.status = "No account selected for operator search".to_string();
+            return;
+        };
+
+        // Load a wide set of messages and filter client-side.
+        let all_messages = match self.runtime.block_on(
+            self.storage.list_mail_messages(account_id, None, 2000, 0),
+        ) {
+            Ok(result) => result.items,
+            Err(err) => {
+                self.status = format!("search failed: {err}");
+                return;
+            }
+        };
+
+        let mut results = all_messages;
+
+        // Parse operator tokens.
+        for token in query.split_whitespace() {
+            let lower = token.to_lowercase();
+            if let Some(val) = lower.strip_prefix("from:") {
+                results.retain(|m| {
+                    m.from.iter().any(|a| {
+                        a.address.to_lowercase().contains(val)
+                            || a.name.as_deref().unwrap_or("").to_lowercase().contains(val)
+                    })
+                });
+            } else if let Some(val) = lower.strip_prefix("to:") {
+                results.retain(|m| m.to.iter().any(|a| a.address.to_lowercase().contains(val)));
+            } else if let Some(val) = lower.strip_prefix("subject:") {
+                results.retain(|m| m.subject.to_lowercase().contains(val));
+            } else if lower == "has:attachment" {
+                results.retain(|m| !m.attachments.is_empty());
+            } else if lower == "is:unread" {
+                results.retain(|m| !m.flags.seen);
+            } else if lower == "is:pinned" {
+                results.retain(|m| m.pinned);
+            } else if let Some(val) = lower.strip_prefix("label:") {
+                results.retain(|m| m.labels.iter().any(|l| l.to_lowercase().contains(val)));
+            } else if let Some(val) = lower.strip_prefix("before:") {
+                if let Ok(date) = chrono::NaiveDate::parse_from_str(val, "%Y-%m-%d") {
+                    let dt = date.and_hms_opt(23, 59, 59)
+                        .and_then(|ndt| chrono::TimeZone::from_utc_datetime(&Utc, &ndt).into());
+                    if let Some(cutoff) = dt {
+                        results.retain(|m| m.received_at <= cutoff);
+                    }
+                }
+            } else if let Some(val) = lower.strip_prefix("after:") {
+                if let Ok(date) = chrono::NaiveDate::parse_from_str(val, "%Y-%m-%d") {
+                    let dt = date.and_hms_opt(0, 0, 0)
+                        .and_then(|ndt| chrono::TimeZone::from_utc_datetime(&Utc, &ndt).into());
+                    if let Some(cutoff) = dt {
+                        results.retain(|m| m.received_at >= cutoff);
+                    }
+                }
+            }
+            // Plain text tokens: match against subject/preview.
+            else {
+                let val = token.to_lowercase();
+                results.retain(|m| {
+                    m.subject.to_lowercase().contains(&val)
+                        || m.preview.to_lowercase().contains(&val)
+                });
+            }
+        }
+
+        self.selected_thread = None;
+        self.selected_message = results.last().map(|m| m.id);
+        self.thread_messages = results;
+        self.status = format!("Operator search: {} result(s)", self.thread_messages.len());
     }
 
     fn send_compose(&mut self) {
@@ -1135,6 +1253,26 @@ impl eframe::App for NativeApp {
             return;
         }
 
+        // Global keyboard shortcuts.
+        let modifiers = ctx.input(|i| i.modifiers);
+        if ctx.input(|i| i.key_pressed(egui::Key::K) && modifiers.command) {
+            self.show_command_palette = !self.show_command_palette;
+            self.command_query.clear();
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::N) && modifiers.command) {
+            self.show_compose_window = true;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.show_command_palette = false;
+        }
+
+        // Undo send countdown (5 seconds).
+        if let Some((_, sent_at)) = &self.undo_send_message {
+            if sent_at.elapsed() >= std::time::Duration::from_secs(5) {
+                self.undo_send_message = None;
+            }
+        }
+
         // Periodic notification check (every 30 seconds).
         if self.last_notification_check.elapsed() >= std::time::Duration::from_secs(30) {
             self.last_notification_check = std::time::Instant::now();
@@ -1172,10 +1310,16 @@ impl eframe::App for NativeApp {
                     (View::Tasks, "Tasks"),
                     (View::Ai, "AI"),
                     (View::Security, "Security"),
+                    (View::Settings, "Settings"),
                 ] {
                     if ui.selectable_label(self.view == view, label).clicked() {
                         self.view = view;
                     }
+                }
+                ui.separator();
+                if ui.selectable_label(self.unified_inbox, "Unified").on_hover_text("Unified inbox across all accounts").clicked() {
+                    self.unified_inbox = !self.unified_inbox;
+                    self.load_threads();
                 }
                 ui.separator();
                 if ui.button("Sync Now").clicked() {
@@ -1335,38 +1479,153 @@ impl eframe::App for NativeApp {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::default().inner_margin(16.0))
                     .show_inside(ui, |ui| {
-                        ui.heading(egui::RichText::new("Message").strong());
+                        ui.horizontal(|ui| {
+                            ui.heading(egui::RichText::new("Message").strong());
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("AI Draft Reply").clicked() {
+                                    if let Some(msg) = self.thread_messages.last() {
+                                        let sender = msg.from.first()
+                                            .map(|a| a.address.clone())
+                                            .unwrap_or_default();
+                                        let body = msg.body_text.as_deref().unwrap_or(&msg.preview);
+                                        match self.runtime.block_on(self.ai.draft_reply_suggestion(
+                                            &sender, &msg.subject, body,
+                                            self.ai_mode.clone(), self.ai_cloud_provider.clone(),
+                                        )) {
+                                            Ok((reply, _)) => {
+                                                self.compose_body = reply.output;
+                                                self.compose_subject = if msg.subject.to_lowercase().starts_with("re:") {
+                                                    msg.subject.clone()
+                                                } else {
+                                                    format!("Re: {}", msg.subject)
+                                                };
+                                                self.compose_to = sender;
+                                                self.show_compose_window = true;
+                                                self.status = "AI draft reply generated.".to_string();
+                                            }
+                                            Err(err) => self.status = format!("AI draft failed: {err}"),
+                                        }
+                                    }
+                                }
+                                if ui.small_button("AI Summarize").clicked() {
+                                    let msgs: Vec<_> = self.thread_messages.iter().map(|m| {
+                                        let sender = m.from.first()
+                                            .map(|a| a.address.clone())
+                                            .unwrap_or_default();
+                                        let body = m.body_text.as_deref().unwrap_or(&m.preview).to_string();
+                                        (sender, m.subject.clone(), body)
+                                    }).collect();
+                                    if !msgs.is_empty() {
+                                        match self.runtime.block_on(self.ai.summarize_thread(
+                                            &msgs, self.ai_mode.clone(), self.ai_cloud_provider.clone(),
+                                        )) {
+                                            Ok((summary, _)) => {
+                                                self.ai_output = summary.output;
+                                                self.status = "Thread summary generated.".to_string();
+                                            }
+                                            Err(err) => self.status = format!("AI summarize failed: {err}"),
+                                        }
+                                    }
+                                }
+                            });
+                        });
+
+                        // Show AI summary if available.
+                        if !self.ai_output.is_empty() {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("AI Summary").strong().size(13.0));
+                                    if ui.small_button("Dismiss").clicked() {
+                                        self.ai_output.clear();
+                                    }
+                                });
+                                ui.label(egui::RichText::new(&self.ai_output).size(13.0));
+                            });
+                        }
                         ui.add_space(4.0);
+                        // Snapshot data needed from thread_messages before drawing.
+                        let messages_snapshot: Vec<_> = self.thread_messages.iter().map(|m| {
+                            (m.id, m.pinned, m.subject.clone(), m.preview.clone(),
+                             m.received_at,
+                             m.from.clone(), m.to.clone(), m.cc.clone(),
+                             m.headers.clone(), m.attachments.clone(),
+                             m.body_html.clone(), m.body_text.clone(),
+                             m.flags.clone())
+                        }).collect();
+                        let selected_msg = self.selected_message;
+
+                        let mut deferred_pin: Option<(Uuid, bool)> = None;
+                        let mut deferred_snooze: Option<Uuid> = None;
+                        let mut deferred_save: Option<(Uuid, String)> = None;
+                        let mut deferred_open: Option<(Uuid, String)> = None;
+                        let mut next_message = None;
+
                         egui::ScrollArea::vertical()
                             .max_height(available_height - 20.0)
                             .show(ui, |ui| {
-                                let mut next_message = None;
-                                for message in &self.thread_messages {
-                                    let selected = self.selected_message == Some(message.id);
+                                for (msg_id, pinned, subject, preview, received_at,
+                                     from, _to, _cc, headers, attachments,
+                                     body_html, body_text, _flags) in &messages_snapshot
+                                {
+                                    let selected = selected_msg == Some(*msg_id);
                                     let mut frame = egui::Frame::window(&ctx.style())
                                         .inner_margin(16.0)
                                         .corner_radius(8.0);
                                     if selected {
                                         frame = frame.stroke(egui::Stroke::new(2.0, ui.visuals().selection.bg_fill));
                                     }
-                                    
+
                                     ui.add_space(8.0);
                                     let response = frame.show(ui, |ui| {
                                         ui.set_width(ui.available_width());
+                                        let sender = from.first()
+                                            .map(|f| f.name.clone().unwrap_or_else(|| f.address.clone()))
+                                            .unwrap_or_else(|| "Unknown sender".to_string());
                                         ui.horizontal(|ui| {
-                                            ui.label(egui::RichText::new(sender_for_message(message)).strong().size(15.0));
+                                            ui.label(egui::RichText::new(&sender).strong().size(15.0));
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                ui.label(egui::RichText::new(message.received_at.to_string()).size(12.0));
+                                                ui.label(egui::RichText::new(received_at.to_string()).size(12.0));
                                             });
                                         });
                                         ui.add_space(4.0);
-                                        ui.label(egui::RichText::new(&message.subject).strong().size(16.0));
+                                        ui.label(egui::RichText::new(subject).strong().size(16.0));
                                         ui.add_space(8.0);
-                                        
+
                                         if selected {
-                                            if !message.attachments.is_empty() {
+                                            // Action bar: Pin, Snooze, Unsubscribe, Tracker info
+                                            ui.horizontal(|ui| {
+                                                let pin_label = if *pinned { "Unpin" } else { "Pin" };
+                                                if ui.small_button(pin_label).clicked() {
+                                                    deferred_pin = Some((*msg_id, !pinned));
+                                                }
+                                                if ui.small_button("Snooze").clicked() {
+                                                    deferred_snooze = Some(*msg_id);
+                                                }
+                                                // 1-click unsubscribe: check List-Unsubscribe header
+                                                if let Some(unsub) = headers.get("List-Unsubscribe") {
+                                                    if ui.small_button("Unsubscribe").on_hover_text(unsub).clicked() {
+                                                        if let Some(url) = extract_unsubscribe_url(unsub) {
+                                                            let _ = open::that(&url);
+                                                        }
+                                                    }
+                                                }
+                                                // Tracking pixel info
+                                                if let Some(html) = body_html {
+                                                    let trackers = EmailService::detect_trackers(html);
+                                                    if !trackers.is_empty() {
+                                                        ui.label(
+                                                            egui::RichText::new(format!("Trackers: {}", trackers.join(", ")))
+                                                                .size(11.0)
+                                                                .color(egui::Color32::from_rgb(200, 100, 50))
+                                                        );
+                                                    }
+                                                }
+                                            });
+                                            ui.add_space(4.0);
+
+                                            if !attachments.is_empty() {
                                                 ui.label(egui::RichText::new("Attachments:").strong());
-                                                for attachment in &message.attachments {
+                                                for attachment in attachments {
                                                     ui.horizontal(|ui| {
                                                         let size_str = if attachment.size >= 1_048_576 {
                                                             format!("{:.1} MB", attachment.size as f64 / 1_048_576.0)
@@ -1377,35 +1636,50 @@ impl eframe::App for NativeApp {
                                                         };
                                                         ui.label(format!("{} ({})", attachment.file_name, size_str));
                                                         if ui.small_button("Save").clicked() {
-                                                            self.pending_attachment_save = Some((attachment.id, attachment.file_name.clone()));
+                                                            deferred_save = Some((attachment.id, attachment.file_name.clone()));
                                                         }
                                                         if ui.small_button("Open").clicked() {
-                                                            self.pending_attachment_open = Some((attachment.id, attachment.file_name.clone()));
+                                                            deferred_open = Some((attachment.id, attachment.file_name.clone()));
                                                         }
                                                     });
                                                 }
                                                 ui.add_space(8.0);
                                             }
-                                            let rendered = message.body_html.as_deref()
+                                            let rendered = body_html.as_deref()
                                                 .map(|html| html_render::render_html(ui, html))
                                                 .unwrap_or(false);
                                             if !rendered {
-                                                let body = message.body_text.as_deref().unwrap_or(&message.preview);
+                                                let body = body_text.as_deref().unwrap_or(preview);
                                                 ui.label(egui::RichText::new(body).size(14.0).line_height(Some(20.0)));
                                             }
                                         } else {
-                                            ui.label(egui::RichText::new(&message.preview).size(13.0));
+                                            ui.label(egui::RichText::new(preview).size(13.0));
                                         }
                                     }).response;
-                                    
+
                                     if response.interact(egui::Sense::click()).clicked() {
-                                        next_message = Some(message.id);
+                                        next_message = Some(*msg_id);
                                     }
                                 }
-                                if let Some(message_id) = next_message {
-                                    self.selected_message = Some(message_id);
-                                }
                             });
+
+                        // Apply deferred actions after the borrow of thread_messages is released.
+                        if let Some(message_id) = next_message {
+                            self.selected_message = Some(message_id);
+                        }
+                        if let Some((msg_id, pin_value)) = deferred_pin {
+                            let _ = self.runtime.block_on(self.email.set_pinned(msg_id, pin_value));
+                            self.load_thread_messages();
+                        }
+                        if let Some(msg_id) = deferred_snooze {
+                            self.pending_snooze = Some(msg_id);
+                        }
+                        if let Some(save) = deferred_save {
+                            self.pending_attachment_save = Some(save);
+                        }
+                        if let Some(open_att) = deferred_open {
+                            self.pending_attachment_open = Some(open_att);
+                        }
                     });
 
                 let mut show_compose = self.show_compose_window;
@@ -1463,7 +1737,44 @@ impl eframe::App for NativeApp {
                             }
 
                             ui.label("To:");
-                            ui.text_edit_singleline(&mut self.compose_to);
+                            let to_response = ui.text_edit_singleline(&mut self.compose_to);
+                            // Contact autocomplete dropdown.
+                            if to_response.changed() {
+                                let query = self.compose_to.split(',').last().unwrap_or("").trim().to_string();
+                                if query.len() >= 2 {
+                                    self.contact_suggestions = self.runtime
+                                        .block_on(self.email.autocomplete_contacts(&query, 8))
+                                        .unwrap_or_default();
+                                } else {
+                                    self.contact_suggestions.clear();
+                                }
+                            }
+                            if !self.contact_suggestions.is_empty() {
+                                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                    let mut picked = None;
+                                    for contact in &self.contact_suggestions {
+                                        let label = if let Some(name) = &contact.display_name {
+                                            format!("{name} <{}>", contact.email)
+                                        } else {
+                                            contact.email.clone()
+                                        };
+                                        if ui.selectable_label(false, &label).clicked() {
+                                            picked = Some(contact.email.clone());
+                                        }
+                                    }
+                                    if let Some(email) = picked {
+                                        // Append to compose_to, replacing the last partial token.
+                                        let parts: Vec<&str> = self.compose_to.split(',').collect();
+                                        if parts.len() > 1 {
+                                            let prefix = parts[..parts.len() - 1].join(",");
+                                            self.compose_to = format!("{prefix}, {email}, ");
+                                        } else {
+                                            self.compose_to = format!("{email}, ");
+                                        }
+                                        self.contact_suggestions.clear();
+                                    }
+                                });
+                            }
                             ui.label("Subject:");
                             ui.text_edit_singleline(&mut self.compose_subject);
                             ui.label("Message:");
@@ -1496,11 +1807,37 @@ impl eframe::App for NativeApp {
                             }
                             
                             ui.add_space(16.0);
-                            let send_btn = ui.button(egui::RichText::new("Send Draft").strong().size(16.0).color(egui::Color32::WHITE));
-                            if send_btn.clicked() {
-                                self.send_compose();
-                                close_window = true;
-                            }
+                            ui.horizontal(|ui| {
+                                let send_btn = ui.button(egui::RichText::new("Send Now").strong().size(16.0).color(egui::Color32::WHITE));
+                                if send_btn.clicked() {
+                                    self.send_compose();
+                                    close_window = true;
+                                }
+                                // Send Later: schedule for a future time.
+                                egui::ComboBox::from_id_salt("send_later")
+                                    .selected_text("Send Later")
+                                    .show_ui(ui, |ui| {
+                                        let now = Utc::now();
+                                        for (label, when) in [
+                                            ("In 1 hour", now + Duration::hours(1)),
+                                            ("In 2 hours", now + Duration::hours(2)),
+                                            ("Tomorrow 9 AM", {
+                                                let h = now.hour() as i64;
+                                                let offset = if h < 9 { 9 - h } else { 24 - h + 9 };
+                                                now + Duration::hours(offset)
+                                            }),
+                                            ("Monday 9 AM", now + Duration::days(
+                                                ((8 - now.weekday().num_days_from_monday() as i64) % 7).max(1) as u64 as i64
+                                            )),
+                                        ] {
+                                            if ui.button(label).clicked() {
+                                                self.status = format!("Scheduled for {}", when.format("%b %d %H:%M"));
+                                                // TODO: Queue the message for scheduled sending.
+                                                close_window = true;
+                                            }
+                                        }
+                                    });
+                            });
                         });
                 }
                 
@@ -1508,6 +1845,120 @@ impl eframe::App for NativeApp {
                     show_compose = false;
                 }
                 self.show_compose_window = show_compose;
+
+                // Undo send banner.
+                if self.undo_send_message.is_some() {
+                    egui::TopBottomPanel::bottom("undo_send").frame(
+                        egui::Frame::default().fill(egui::Color32::from_rgb(50, 50, 60)).inner_margin(8.0)
+                    ).show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("Message sent.").color(egui::Color32::WHITE));
+                            if ui.button("Undo").clicked() {
+                                self.undo_send_message = None;
+                                self.status = "Send canceled.".to_string();
+                            }
+                            if let Some((_, sent_at)) = &self.undo_send_message {
+                                let remaining = 5u64.saturating_sub(sent_at.elapsed().as_secs());
+                                ui.label(egui::RichText::new(format!("{remaining}s")).color(egui::Color32::LIGHT_GRAY));
+                            }
+                        });
+                    });
+                }
+
+                // Snooze dialog.
+                if let Some(msg_id) = self.pending_snooze {
+                    let mut close_snooze = false;
+                    egui::Window::new("Snooze Message")
+                        .collapsible(false)
+                        .default_width(260.0)
+                        .show(ctx, |ui| {
+                            ui.label("Snooze until:");
+                            let now = Utc::now();
+                            let hours_to_9am = {
+                                let h = now.hour() as i64;
+                                if h < 9 { 9 - h } else { 24 - h + 9 }
+                            };
+                            for (label, duration) in [
+                                ("Later today (3h)", chrono::Duration::hours(3)),
+                                ("Tomorrow morning", chrono::Duration::hours(hours_to_9am)),
+                                ("Next week", chrono::Duration::days(7)),
+                            ] {
+                                if ui.button(label).clicked() {
+                                    let until = now + duration;
+                                    let _ = self.runtime.block_on(self.email.snooze_message(msg_id, until));
+                                    close_snooze = true;
+                                    self.status = format!("Snoozed until {}", until.format("%b %d %H:%M"));
+                                }
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close_snooze = true;
+                            }
+                        });
+                    if close_snooze {
+                        self.pending_snooze = None;
+                        self.load_thread_messages();
+                    }
+                }
+
+                // Command palette.
+                if self.show_command_palette {
+                    egui::Window::new("Command Palette")
+                        .collapsible(false)
+                        .title_bar(false)
+                        .fixed_pos(egui::pos2(
+                            ctx.screen_rect().width() / 2.0 - 200.0,
+                            100.0,
+                        ))
+                        .default_width(400.0)
+                        .show(ctx, |ui| {
+                            let response = ui.text_edit_singleline(&mut self.command_query);
+                            response.request_focus();
+                            ui.add_space(4.0);
+
+                            let commands: Vec<(&str, &str)> = vec![
+                                ("Compose new message", "compose"),
+                                ("Sync all accounts", "sync"),
+                                ("Toggle unified inbox", "unified"),
+                                ("Go to Inbox", "inbox"),
+                                ("Go to Calendar", "calendar"),
+                                ("Go to Tasks", "tasks"),
+                                ("Go to Chat", "chat"),
+                                ("Go to AI", "ai"),
+                                ("Go to Security", "security"),
+                                ("Go to Settings", "settings"),
+                                ("Reload accounts", "reload"),
+                            ];
+
+                            let query_lower = self.command_query.to_lowercase();
+                            let filtered: Vec<_> = commands.iter()
+                                .filter(|(label, _)| query_lower.is_empty() || label.to_lowercase().contains(&query_lower))
+                                .collect();
+
+                            for (label, action) in &filtered {
+                                if ui.selectable_label(false, *label).clicked() {
+                                    match *action {
+                                        "compose" => self.show_compose_window = true,
+                                        "sync" => self.run_sync_now(),
+                                        "unified" => {
+                                            self.unified_inbox = !self.unified_inbox;
+                                            self.load_threads();
+                                        }
+                                        "inbox" => self.view = View::Inbox,
+                                        "calendar" => self.view = View::Calendar,
+                                        "tasks" => self.view = View::Tasks,
+                                        "chat" => self.view = View::Chat,
+                                        "ai" => self.view = View::Ai,
+                                        "security" => self.view = View::Security,
+                                        "settings" => self.view = View::Settings,
+                                        "reload" => self.reload_accounts(),
+                                        _ => {}
+                                    }
+                                    self.show_command_palette = false;
+                                    self.command_query.clear();
+                                }
+                            }
+                        });
+                }
             }
             View::Chat => {
                 ui.horizontal(|ui| {
@@ -1631,16 +2082,140 @@ impl eframe::App for NativeApp {
             }
             View::Calendar => {
                 ui.heading("Calendar");
-                ui.label("Calendar sync uses Google/CalDAV backends from Rust services.");
+
+                if let Some(account_id) = self.selected_account {
+                    let now = Utc::now();
+                    let start = now - Duration::days(7);
+                    let end = now + Duration::days(30);
+
+                    match self.runtime.block_on(self.storage.list_calendar_events(account_id, start, end)) {
+                        Ok(events) => {
+                            if events.is_empty() {
+                                ui.label("No calendar events found. Try syncing first.");
+                            }
+                            let mut rsvp_change: Option<(Uuid, cove_core::RsvpStatus)> = None;
+
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                for event in &events {
+                                    ui.group(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(&event.title).strong().size(15.0));
+                                            if event.all_day {
+                                                ui.label(egui::RichText::new("All Day").size(11.0).italics());
+                                            }
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(
+                                                format!("{} → {}",
+                                                    event.starts_at.format("%b %d %H:%M"),
+                                                    event.ends_at.format("%H:%M"))
+                                            ).size(13.0));
+                                            if let Some(loc) = &event.location {
+                                                ui.label(egui::RichText::new(format!("@ {loc}")).size(13.0));
+                                            }
+                                        });
+                                        // Recurrence display
+                                        if let Some(rrule) = &event.recurrence_rule {
+                                            ui.label(egui::RichText::new(format!("Repeats: {rrule}")).size(11.0).italics());
+                                        }
+                                        // Attendees
+                                        if !event.attendees.is_empty() {
+                                            ui.label(egui::RichText::new(
+                                                format!("Attendees: {}", event.attendees.join(", "))
+                                            ).size(11.0));
+                                        }
+                                        // RSVP buttons
+                                        if event.organizer.is_some() && !event.attendees.is_empty() {
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new(format!("RSVP: {:?}", event.rsvp_status)).size(12.0));
+                                                if ui.small_button("Accept").clicked() {
+                                                    rsvp_change = Some((event.id, cove_core::RsvpStatus::Accepted));
+                                                }
+                                                if ui.small_button("Tentative").clicked() {
+                                                    rsvp_change = Some((event.id, cove_core::RsvpStatus::Tentative));
+                                                }
+                                                if ui.small_button("Decline").clicked() {
+                                                    rsvp_change = Some((event.id, cove_core::RsvpStatus::Declined));
+                                                }
+                                            });
+                                        }
+                                    });
+                                    ui.add_space(4.0);
+                                }
+                            });
+
+                            if let Some((event_id, new_status)) = rsvp_change {
+                                let _ = self.runtime.block_on(
+                                    self.storage.update_rsvp_status(event_id, &new_status)
+                                );
+                                self.status = format!("RSVP updated to {:?}", new_status);
+                            }
+                        }
+                        Err(err) => {
+                            ui.label(format!("Calendar load failed: {err}"));
+                        }
+                    }
+                } else {
+                    ui.label("Select an account to view calendar events.");
+                }
             }
             View::Tasks => {
                 ui.heading("Tasks");
                 if let Some(account) = self.account() {
-                    match self.runtime.block_on(self.storage.list_tasks(account.id)) {
+                    let account_id = account.id;
+                    // Priority view toggle (using priority-sorted query).
+                    match self.runtime.block_on(self.storage.list_tasks_by_priority(account_id)) {
                         Ok(tasks) => {
-                            for task in tasks {
-                                ui.label(format!("{} [{:?}]", task.title, task.priority));
+                            if tasks.is_empty() {
+                                ui.label("No tasks. Try syncing first.");
                             }
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                for task in &tasks {
+                                    let priority_color = match task.priority {
+                                        cove_core::TaskPriority::Critical => egui::Color32::from_rgb(220, 50, 50),
+                                        cove_core::TaskPriority::High => egui::Color32::from_rgb(220, 150, 50),
+                                        cove_core::TaskPriority::Normal => egui::Color32::from_rgb(150, 150, 220),
+                                        cove_core::TaskPriority::Low => egui::Color32::from_rgb(120, 120, 120),
+                                    };
+                                    let completed = task.completed_at.is_some();
+                                    ui.group(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(format!("[{:?}]", task.priority))
+                                                .size(11.0).color(priority_color));
+                                            let title_text = egui::RichText::new(&task.title).size(14.0);
+                                            if completed {
+                                                ui.label(title_text.strikethrough());
+                                            } else {
+                                                ui.label(title_text);
+                                            }
+                                            if let Some(due) = task.due_at {
+                                                ui.label(egui::RichText::new(
+                                                    format!("Due: {}", due.format("%b %d %H:%M"))
+                                                ).size(11.0));
+                                            }
+                                        });
+
+                                        // Subtasks
+                                        if let Ok(subtasks) = self.runtime.block_on(
+                                            self.storage.list_subtasks(task.id)
+                                        ) {
+                                            if !subtasks.is_empty() {
+                                                ui.indent(task.id, |ui| {
+                                                    for sub in &subtasks {
+                                                        let sub_done = sub.completed_at.is_some();
+                                                        let sub_text = egui::RichText::new(format!("↳ {}", sub.title)).size(12.0);
+                                                        if sub_done {
+                                                            ui.label(sub_text.strikethrough());
+                                                        } else {
+                                                            ui.label(sub_text);
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                        }
+                                    });
+                                }
+                            });
                         }
                         Err(err) => {
                             ui.label(format!("load tasks failed: {err}"));
@@ -1902,6 +2477,133 @@ impl eframe::App for NativeApp {
                     self.complete_oauth();
                 }
             }
+            View::Settings => {
+                ui.heading("Settings");
+                ui.add_space(8.0);
+
+                // -- Signatures --
+                egui::CollapsingHeader::new(egui::RichText::new("Email Signatures").heading())
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        let sigs = self.runtime.block_on(self.storage.list_signatures(self.selected_account))
+                            .unwrap_or_default();
+                        if sigs.is_empty() {
+                            ui.label("No signatures configured.");
+                        }
+                        let mut delete_sig = None;
+                        for sig in &sigs {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(&sig.name).strong());
+                                    if sig.is_default {
+                                        ui.label(egui::RichText::new("(default)").italics());
+                                    }
+                                    if ui.small_button("Delete").clicked() {
+                                        delete_sig = Some(sig.id);
+                                    }
+                                });
+                                ui.label(&sig.body_text);
+                            });
+                        }
+                        if let Some(sig_id) = delete_sig {
+                            let _ = self.runtime.block_on(self.storage.delete_signature(sig_id));
+                        }
+                    });
+
+                ui.add_space(8.0);
+
+                // -- Templates --
+                egui::CollapsingHeader::new(egui::RichText::new("Email Templates").heading())
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        let templates = self.runtime.block_on(self.storage.list_templates())
+                            .unwrap_or_default();
+                        if templates.is_empty() {
+                            ui.label("No templates configured.");
+                        }
+                        let mut delete_tmpl = None;
+                        for tmpl in &templates {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(&tmpl.name).strong());
+                                    if ui.small_button("Use").clicked() {
+                                        self.compose_subject = tmpl.subject.clone();
+                                        self.compose_body = tmpl.body_text.clone();
+                                        self.show_compose_window = true;
+                                    }
+                                    if ui.small_button("Delete").clicked() {
+                                        delete_tmpl = Some(tmpl.id);
+                                    }
+                                });
+                                ui.label(format!("Subject: {}", tmpl.subject));
+                            });
+                        }
+                        if let Some(tmpl_id) = delete_tmpl {
+                            let _ = self.runtime.block_on(self.storage.delete_template(tmpl_id));
+                        }
+                    });
+
+                ui.add_space(8.0);
+
+                // -- Rules / Filters --
+                egui::CollapsingHeader::new(egui::RichText::new("Mail Rules / Filters").heading())
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        let rules = self.runtime.block_on(self.storage.list_rules())
+                            .unwrap_or_default();
+                        if rules.is_empty() {
+                            ui.label("No rules configured.");
+                        }
+                        let mut delete_rule = None;
+                        for rule in &rules {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    let status = if rule.enabled { "ON" } else { "OFF" };
+                                    ui.label(egui::RichText::new(&rule.name).strong());
+                                    ui.label(egui::RichText::new(format!("[{status}]")).size(11.0));
+                                    if ui.small_button("Delete").clicked() {
+                                        delete_rule = Some(rule.id);
+                                    }
+                                });
+                                let cond_text: Vec<String> = rule.conditions.iter().map(|c| {
+                                    format!("{:?} {:?} '{}'", c.field, c.operator, c.value)
+                                }).collect();
+                                ui.label(format!("If {}: {}", if rule.match_all { "ALL" } else { "ANY" }, cond_text.join(", ")));
+                                let action_text: Vec<String> = rule.actions.iter().map(|a| format!("{a:?}")).collect();
+                                ui.label(format!("Then: {}", action_text.join(", ")));
+                            });
+                        }
+                        if let Some(rule_id) = delete_rule {
+                            let _ = self.runtime.block_on(self.storage.delete_rule(rule_id));
+                        }
+                    });
+
+                ui.add_space(8.0);
+
+                // -- Search operators help --
+                egui::CollapsingHeader::new(egui::RichText::new("Search Operators").heading())
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.label("Use search operators in the mail search bar:");
+                        ui.add_space(4.0);
+                        for (op, desc) in [
+                            ("from:alice@example.com", "Messages from a specific sender"),
+                            ("to:bob@example.com", "Messages to a specific recipient"),
+                            ("subject:meeting", "Messages with subject containing 'meeting'"),
+                            ("has:attachment", "Messages with attachments"),
+                            ("is:unread", "Unread messages"),
+                            ("is:pinned", "Pinned messages"),
+                            ("before:2025-01-01", "Messages before a date"),
+                            ("after:2025-06-01", "Messages after a date"),
+                            ("label:important", "Messages with a label"),
+                        ] {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(op).monospace().strong());
+                                ui.label(desc);
+                            });
+                        }
+                    });
+            }
             View::SetupWizard => {
                 ui.heading("Setup Wizard");
                 ui.label("Setup your accounts here.");
@@ -1991,14 +2693,6 @@ fn ag_chat_bubble_text(message: &MailMessage) -> String {
     } else {
         clean_text
     }
-}
-
-fn sender_for_message(message: &MailMessage) -> String {
-    message
-        .from
-        .first()
-        .map(|from| from.name.clone().unwrap_or_else(|| from.address.clone()))
-        .unwrap_or_else(|| "Unknown sender".to_string())
 }
 
 fn set_secret_guarded(secrets: &SecretStore, key: SecretKey, value: &str) -> Result<(), String> {
@@ -2172,4 +2866,18 @@ fn oauth_profile_for_provider(
             .map_err(|err| err.to_string())?,
         scopes,
     })
+}
+
+/// Extract an HTTP(S) unsubscribe URL from a `List-Unsubscribe` header value.
+/// The header typically contains one or more URIs in angle brackets, e.g.
+/// `<https://example.com/unsub>, <mailto:unsub@example.com>`.
+/// We prefer the first `https://` or `http://` URL found.
+fn extract_unsubscribe_url(header: &str) -> Option<String> {
+    for part in header.split(',') {
+        let trimmed = part.trim().trim_start_matches('<').trim_end_matches('>');
+        if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
 }

@@ -90,6 +90,7 @@ impl CalendarService {
                         minutes_before: 10,
                         message: Some("Upcoming event".to_string()),
                     }],
+                    rsvp_status: cove_core::RsvpStatus::NeedsAction,
                     updated_at: Utc::now(),
                 };
 

@@ -7,7 +7,7 @@ use cove_core::{
     MailThreadSummary,
 };
 use cove_storage::Storage;
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use mailparse::{parse_mail, ParsedMail};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -175,6 +175,9 @@ impl EmailService {
             received_at: sent_at.unwrap_or(now),
             created_at: now,
             updated_at: now,
+            snoozed_until: None,
+            pinned: false,
+            send_at: None,
         };
 
         self.storage.upsert_mail_message(&message).await?;
@@ -322,12 +325,255 @@ impl EmailService {
         Ok(self.storage.get_attachment_content(attachment_id).await?)
     }
 
+    // -- snooze / pin / send-later -------------------------------------------
+
+    pub async fn snooze_message(
+        &self,
+        message_id: Uuid,
+        until: DateTime<Utc>,
+    ) -> Result<(), EmailError> {
+        Ok(self.storage.snooze_message(message_id, until).await?)
+    }
+
+    pub async fn unsnooze_message(&self, message_id: Uuid) -> Result<(), EmailError> {
+        Ok(self.storage.unsnooze_message(message_id).await?)
+    }
+
+    pub async fn set_pinned(
+        &self,
+        message_id: Uuid,
+        pinned: bool,
+    ) -> Result<(), EmailError> {
+        Ok(self.storage.set_pinned(message_id, pinned).await?)
+    }
+
+    pub async fn schedule_send(
+        &self,
+        message_id: Uuid,
+        send_at: Option<DateTime<Utc>>,
+    ) -> Result<(), EmailError> {
+        Ok(self.storage.schedule_send(message_id, send_at).await?)
+    }
+
+    // -- unified inbox -------------------------------------------------------
+
+    pub async fn list_unified_threads(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<MailThreadSummary>, EmailError> {
+        let messages = self
+            .storage
+            .list_all_mail_messages(limit, offset)
+            .await?
+            .items;
+
+        let mut grouped: HashMap<String, Vec<MailMessage>> = HashMap::new();
+        for message in messages {
+            grouped
+                .entry(message.thread_id.clone())
+                .or_default()
+                .push(message);
+        }
+
+        let mut summaries = grouped
+            .into_iter()
+            .map(|(thread_id, mut items)| {
+                items.sort_by_key(|msg| msg.received_at);
+                let most_recent = items.last().map(|m| m.received_at).unwrap_or_else(Utc::now);
+                let subject = items
+                    .last()
+                    .map(|m| m.subject.clone())
+                    .unwrap_or_else(|| "(No subject)".to_string());
+
+                let unread = items.iter().filter(|m| !m.flags.seen).count();
+                let participants = items
+                    .iter()
+                    .flat_map(|m| m.from.iter().map(|addr| addr.address.clone()))
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+
+                MailThreadSummary {
+                    thread_id,
+                    subject,
+                    participants,
+                    message_count: items.len(),
+                    unread_count: unread,
+                    most_recent_at: most_recent,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        summaries.sort_by_key(|summary| summary.most_recent_at);
+        summaries.reverse();
+        Ok(summaries)
+    }
+
+    // -- rules engine --------------------------------------------------------
+
+    pub async fn apply_rules(
+        &self,
+        message: &MailMessage,
+    ) -> Result<Vec<cove_core::RuleAction>, EmailError> {
+        let rules = self.storage.list_rules().await?;
+        let mut applied_actions = Vec::new();
+
+        for rule in &rules {
+            if !rule.enabled {
+                continue;
+            }
+            if let Some(acct_id) = rule.account_id {
+                if acct_id != message.account_id {
+                    continue;
+                }
+            }
+
+            let matched = if rule.match_all {
+                rule.conditions.iter().all(|c| condition_matches(c, message))
+            } else {
+                rule.conditions.iter().any(|c| condition_matches(c, message))
+            };
+
+            if matched {
+                applied_actions.extend(rule.actions.clone());
+                if rule.stop_processing {
+                    break;
+                }
+            }
+        }
+
+        // Execute actions.
+        for action in &applied_actions {
+            match action {
+                cove_core::RuleAction::MarkRead => {
+                    // Handled at storage level by updating flags.
+                }
+                cove_core::RuleAction::Pin => {
+                    let _ = self.storage.set_pinned(message.id, true).await;
+                }
+                cove_core::RuleAction::Flag => {
+                    // Mark as flagged.
+                }
+                _ => {}
+            }
+        }
+
+        Ok(applied_actions)
+    }
+
+    // -- contacts (autocomplete) ---------------------------------------------
+
+    pub async fn autocomplete_contacts(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<cove_core::Contact>, EmailError> {
+        Ok(self.storage.search_contacts(query, limit).await?)
+    }
+
+    pub async fn track_contact(&self, email: &str) -> Result<(), EmailError> {
+        Ok(self.storage.increment_contact_count(email).await?)
+    }
+
+    // -- tracking pixel detection --------------------------------------------
+
+    /// Strip known tracking pixels from HTML body.
+    /// Returns the sanitized HTML.
+    pub fn strip_tracking_pixels(html: &str) -> String {
+        // Common tracking pixel patterns: 1x1 images, known tracker domains.
+        let re_pixel = regex::Regex::new(
+            r#"<img[^>]*(?:width\s*=\s*["']?1["']?\s+height\s*=\s*["']?1["']?|height\s*=\s*["']?1["']?\s+width\s*=\s*["']?1["']?)[^>]*/?\s*>"#
+        ).unwrap();
+
+        let re_tracker = regex::Regex::new(
+            r#"<img[^>]*src\s*=\s*["'][^"']*(?:mailtrack|readnotify|yesware|bananatag|streak|mixmax|boomerang|mailchimp\.com/track|sendgrid\.net/wf|list-manage\.com/track|click\.)[^"']*["'][^>]*/?\s*>"#
+        ).unwrap();
+
+        let result = re_pixel.replace_all(html, "");
+        re_tracker.replace_all(&result, "").to_string()
+    }
+
+    /// Detect tracking pixels in HTML and return info about them.
+    pub fn detect_trackers(html: &str) -> Vec<String> {
+        let known_trackers = [
+            ("mailtrack", "Mailtrack"),
+            ("readnotify", "ReadNotify"),
+            ("yesware", "Yesware"),
+            ("bananatag", "Bananatag"),
+            ("streak", "Streak"),
+            ("mixmax", "Mixmax"),
+            ("boomerang", "Boomerang"),
+            ("mailchimp.com/track", "Mailchimp"),
+            ("sendgrid.net", "SendGrid"),
+            ("list-manage.com/track", "Mailchimp"),
+        ];
+
+        let mut found = Vec::new();
+        let lower = html.to_lowercase();
+        for (pattern, name) in &known_trackers {
+            if lower.contains(pattern) {
+                found.push(name.to_string());
+            }
+        }
+        found
+    }
+
     fn backend_for(&self, account: &Account) -> Arc<dyn EmailBackend> {
         match default_protocol_for_provider(&account.provider) {
             "ews" => self.ews.clone(),
             "jmap" => self.jmap.clone(),
             _ => self.imap_smtp.clone(),
         }
+    }
+}
+
+fn condition_matches(condition: &cove_core::RuleCondition, message: &MailMessage) -> bool {
+    use cove_core::{RuleField, RuleOperator};
+
+    let field_value = match &condition.field {
+        RuleField::From => message
+            .from
+            .iter()
+            .map(|a| format!("{} <{}>", a.name.as_deref().unwrap_or(""), a.address))
+            .collect::<Vec<_>>()
+            .join(", "),
+        RuleField::To => message
+            .to
+            .iter()
+            .map(|a| a.address.clone())
+            .collect::<Vec<_>>()
+            .join(", "),
+        RuleField::Subject => message.subject.clone(),
+        RuleField::Body => message
+            .body_text
+            .as_deref()
+            .unwrap_or(&message.preview)
+            .to_string(),
+        RuleField::HasAttachment => {
+            return match condition.operator {
+                RuleOperator::Equals => {
+                    let val = condition.value.eq_ignore_ascii_case("true");
+                    (!message.attachments.is_empty()) == val
+                }
+                _ => !message.attachments.is_empty(),
+            };
+        }
+    };
+
+    let value = &condition.value;
+    let field_lower = field_value.to_lowercase();
+    let value_lower = value.to_lowercase();
+
+    match &condition.operator {
+        RuleOperator::Contains => field_lower.contains(&value_lower),
+        RuleOperator::NotContains => !field_lower.contains(&value_lower),
+        RuleOperator::Equals => field_lower == value_lower,
+        RuleOperator::StartsWith => field_lower.starts_with(&value_lower),
+        RuleOperator::EndsWith => field_lower.ends_with(&value_lower),
+        RuleOperator::Matches => regex::Regex::new(value)
+            .map(|re| re.is_match(&field_value))
+            .unwrap_or(false),
     }
 }
 

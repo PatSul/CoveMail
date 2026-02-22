@@ -140,6 +140,40 @@ impl AiService {
             .await
     }
 
+    /// Summarize an entire email thread (multiple messages).
+    pub async fn summarize_thread(
+        &self,
+        messages: &[(String, String, String)], // (sender, subject, body_snippet)
+        mode: AiMode,
+        cloud_provider: Option<CloudAiProvider>,
+    ) -> Result<(AiResponse, DataProvenance), AiError> {
+        let feature = "email_summarization";
+        let mut prompt = String::from("Summarize this email thread in 3-5 bullet points:\n\n");
+        for (i, (sender, subject, body)) in messages.iter().enumerate() {
+            let snippet: String = body.chars().take(500).collect();
+            prompt.push_str(&format!("Message {}: From: {sender}, Subject: {subject}\n{snippet}\n\n", i + 1));
+        }
+        self.run_feature(feature, &prompt, mode, cloud_provider).await
+    }
+
+    /// Suggest a draft reply to the latest message.
+    pub async fn draft_reply_suggestion(
+        &self,
+        sender: &str,
+        subject: &str,
+        body: &str,
+        mode: AiMode,
+        cloud_provider: Option<CloudAiProvider>,
+    ) -> Result<(AiResponse, DataProvenance), AiError> {
+        let feature = "suggested_reply";
+        let snippet: String = body.chars().take(1000).collect();
+        let prompt = format!(
+            "Draft a brief, professional reply to this email. Only output the reply body.\n\
+             From: {sender}\nSubject: {subject}\n\n{snippet}"
+        );
+        self.run_feature(feature, &prompt, mode, cloud_provider).await
+    }
+
     pub async fn generate_message(
         &self,
         prompt: &str,

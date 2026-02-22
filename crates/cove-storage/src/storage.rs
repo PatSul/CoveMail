@@ -531,21 +531,377 @@ impl Storage {
         Ok(row.map(|r| r.get::<Vec<u8>, _>("content")))
     }
 
+    // -- snooze / pin / send-later ------------------------------------------
+
+    pub async fn snooze_message(
+        &self,
+        message_id: Uuid,
+        until: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        sqlx::query("UPDATE mail_messages SET snoozed_until = ?1 WHERE id = ?2")
+            .bind(until.to_rfc3339())
+            .bind(message_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn unsnooze_message(&self, message_id: Uuid) -> Result<(), StorageError> {
+        sqlx::query("UPDATE mail_messages SET snoozed_until = NULL WHERE id = ?1")
+            .bind(message_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_pinned(
+        &self,
+        message_id: Uuid,
+        pinned: bool,
+    ) -> Result<(), StorageError> {
+        sqlx::query("UPDATE mail_messages SET pinned = ?1 WHERE id = ?2")
+            .bind(pinned as i32)
+            .bind(message_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn schedule_send(
+        &self,
+        message_id: Uuid,
+        send_at: Option<DateTime<Utc>>,
+    ) -> Result<(), StorageError> {
+        sqlx::query("UPDATE mail_messages SET send_at = ?1 WHERE id = ?2")
+            .bind(send_at.map(|t| t.to_rfc3339()))
+            .bind(message_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn due_scheduled_messages(&self) -> Result<Vec<cove_core::MailMessage>, StorageError> {
+        let now = Utc::now().to_rfc3339();
+        let rows = sqlx::query(
+            "SELECT * FROM mail_messages WHERE send_at IS NOT NULL AND send_at <= ?1",
+        )
+        .bind(&now)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(Self::row_to_mail_message).collect()
+    }
+
+    // -- unified inbox -------------------------------------------------------
+
+    pub async fn list_all_mail_messages(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<SearchResult<cove_core::MailMessage>, StorageError> {
+        let count_row = sqlx::query(
+            "SELECT COUNT(*) as cnt FROM mail_messages WHERE folder_path = 'INBOX'",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        let total: i64 = count_row.try_get("cnt")?;
+
+        let rows = sqlx::query(
+            r#"
+            SELECT * FROM mail_messages
+            WHERE folder_path = 'INBOX'
+            ORDER BY pinned DESC, received_at DESC
+            LIMIT ?1 OFFSET ?2
+            "#,
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let items: Vec<_> = rows.into_iter().map(Self::row_to_mail_message).collect::<Result<_, _>>()?;
+        Ok(SearchResult {
+            total: total as usize,
+            items,
+        })
+    }
+
+    // -- signatures ----------------------------------------------------------
+
+    pub async fn upsert_signature(
+        &self,
+        sig: &cove_core::EmailSignature,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO email_signatures (id, account_id, name, body_html, body_text, is_default)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+        )
+        .bind(sig.id.to_string())
+        .bind(sig.account_id.map(|id| id.to_string()))
+        .bind(&sig.name)
+        .bind(&sig.body_html)
+        .bind(&sig.body_text)
+        .bind(sig.is_default as i32)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_signatures(
+        &self,
+        account_id: Option<Uuid>,
+    ) -> Result<Vec<cove_core::EmailSignature>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT * FROM email_signatures WHERE account_id IS ?1 OR account_id IS NULL ORDER BY is_default DESC, name",
+        )
+        .bind(account_id.map(|id| id.to_string()))
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                let id: String = row.try_get("id")?;
+                let acct: Option<String> = row.try_get("account_id")?;
+                Ok(cove_core::EmailSignature {
+                    id: parse_uuid(&id, "email_signatures.id")?,
+                    account_id: acct.as_deref().map(|v| parse_uuid(v, "email_signatures.account_id")).transpose()?,
+                    name: row.try_get("name")?,
+                    body_html: row.try_get("body_html")?,
+                    body_text: row.try_get("body_text")?,
+                    is_default: row.try_get::<i32, _>("is_default")? != 0,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn delete_signature(&self, id: Uuid) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM email_signatures WHERE id = ?1")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // -- templates -----------------------------------------------------------
+
+    pub async fn upsert_template(
+        &self,
+        tpl: &cove_core::EmailTemplate,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO email_templates (id, name, subject, body_html, body_text)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+        )
+        .bind(tpl.id.to_string())
+        .bind(&tpl.name)
+        .bind(&tpl.subject)
+        .bind(&tpl.body_html)
+        .bind(&tpl.body_text)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_templates(&self) -> Result<Vec<cove_core::EmailTemplate>, StorageError> {
+        let rows = sqlx::query("SELECT * FROM email_templates ORDER BY name")
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                let id: String = row.try_get("id")?;
+                Ok(cove_core::EmailTemplate {
+                    id: parse_uuid(&id, "email_templates.id")?,
+                    name: row.try_get("name")?,
+                    subject: row.try_get("subject")?,
+                    body_html: row.try_get("body_html")?,
+                    body_text: row.try_get("body_text")?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn delete_template(&self, id: Uuid) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM email_templates WHERE id = ?1")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // -- mail rules ----------------------------------------------------------
+
+    pub async fn upsert_rule(
+        &self,
+        rule: &cove_core::MailRule,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO mail_rules
+              (id, account_id, name, enabled, conditions_json, match_all, actions_json, stop_processing, sort_order)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "#,
+        )
+        .bind(rule.id.to_string())
+        .bind(rule.account_id.map(|id| id.to_string()))
+        .bind(&rule.name)
+        .bind(rule.enabled as i32)
+        .bind(serde_json::to_string(&rule.conditions)?)
+        .bind(rule.match_all as i32)
+        .bind(serde_json::to_string(&rule.actions)?)
+        .bind(rule.stop_processing as i32)
+        .bind(rule.order)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_rules(&self) -> Result<Vec<cove_core::MailRule>, StorageError> {
+        let rows = sqlx::query("SELECT * FROM mail_rules ORDER BY sort_order")
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                let id: String = row.try_get("id")?;
+                let acct: Option<String> = row.try_get("account_id")?;
+                Ok(cove_core::MailRule {
+                    id: parse_uuid(&id, "mail_rules.id")?,
+                    account_id: acct.as_deref().map(|v| parse_uuid(v, "mail_rules.account_id")).transpose()?,
+                    name: row.try_get("name")?,
+                    enabled: row.try_get::<i32, _>("enabled")? != 0,
+                    conditions: parse_json(&row.try_get::<String, _>("conditions_json")?, "mail_rules.conditions_json")?,
+                    match_all: row.try_get::<i32, _>("match_all")? != 0,
+                    actions: parse_json(&row.try_get::<String, _>("actions_json")?, "mail_rules.actions_json")?,
+                    stop_processing: row.try_get::<i32, _>("stop_processing")? != 0,
+                    order: row.try_get("sort_order")?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn delete_rule(&self, id: Uuid) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM mail_rules WHERE id = ?1")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // -- contacts ------------------------------------------------------------
+
+    pub async fn upsert_contact(
+        &self,
+        contact: &cove_core::Contact,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            INSERT INTO contacts (id, account_id, email, display_name, phone, organization, notes, last_contacted, contact_count)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(email) DO UPDATE SET
+              display_name = COALESCE(excluded.display_name, contacts.display_name),
+              phone = COALESCE(excluded.phone, contacts.phone),
+              organization = COALESCE(excluded.organization, contacts.organization),
+              notes = COALESCE(excluded.notes, contacts.notes),
+              last_contacted = excluded.last_contacted,
+              contact_count = excluded.contact_count
+            "#,
+        )
+        .bind(contact.id.to_string())
+        .bind(contact.account_id.map(|id| id.to_string()))
+        .bind(&contact.email)
+        .bind(&contact.display_name)
+        .bind(&contact.phone)
+        .bind(&contact.organization)
+        .bind(&contact.notes)
+        .bind(contact.last_contacted.map(|dt| dt.to_rfc3339()))
+        .bind(contact.contact_count)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn search_contacts(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<cove_core::Contact>, StorageError> {
+        let pattern = format!("%{query}%");
+        let rows = sqlx::query(
+            r#"
+            SELECT * FROM contacts
+            WHERE email LIKE ?1 OR display_name LIKE ?1
+            ORDER BY contact_count DESC, display_name
+            LIMIT ?2
+            "#,
+        )
+        .bind(&pattern)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                let id: String = row.try_get("id")?;
+                let acct: Option<String> = row.try_get("account_id")?;
+                let last: Option<String> = row.try_get("last_contacted")?;
+                Ok(cove_core::Contact {
+                    id: parse_uuid(&id, "contacts.id")?,
+                    account_id: acct.as_deref().map(|v| parse_uuid(v, "contacts.account_id")).transpose()?,
+                    email: row.try_get("email")?,
+                    display_name: row.try_get("display_name")?,
+                    phone: row.try_get("phone")?,
+                    organization: row.try_get("organization")?,
+                    notes: row.try_get("notes")?,
+                    last_contacted: last.as_deref().map(|v| parse_datetime(v, "contacts.last_contacted")).transpose()?,
+                    contact_count: row.try_get::<u32, _>("contact_count").unwrap_or(0),
+                })
+            })
+            .collect()
+    }
+
+    pub async fn increment_contact_count(&self, email: &str) -> Result<(), StorageError> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO contacts (id, email, contact_count, last_contacted)
+            VALUES (?1, ?2, 1, ?3)
+            ON CONFLICT(email) DO UPDATE SET
+              contact_count = contacts.contact_count + 1,
+              last_contacted = excluded.last_contacted
+            "#,
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(email)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     // -- calendar ----------------------------------------------------------
 
     pub async fn upsert_calendar_event(&self, event: &CalendarEvent) -> Result<(), StorageError> {
+        let rsvp_str = serde_json::to_string(&event.rsvp_status)
+            .unwrap_or_else(|_| "\"needs_action\"".to_string())
+            .trim_matches('"')
+            .to_string();
+
         sqlx::query(
             r#"
             INSERT INTO calendar_events (
               id, account_id, calendar_id, remote_id, title,
               description, location, timezone, starts_at, ends_at,
               all_day, recurrence_rule, attendees_json, organizer,
-              alarms_json, updated_at
+              alarms_json, rsvp_status, updated_at
             ) VALUES (
               ?1, ?2, ?3, ?4, ?5,
               ?6, ?7, ?8, ?9, ?10,
               ?11, ?12, ?13, ?14,
-              ?15, ?16
+              ?15, ?16, ?17
             )
             ON CONFLICT(id) DO UPDATE SET
               account_id = excluded.account_id,
@@ -562,6 +918,7 @@ impl Storage {
               attendees_json = excluded.attendees_json,
               organizer = excluded.organizer,
               alarms_json = excluded.alarms_json,
+              rsvp_status = excluded.rsvp_status,
               updated_at = excluded.updated_at
             "#,
         )
@@ -580,10 +937,28 @@ impl Storage {
         .bind(serde_json::to_string(&event.attendees)?)
         .bind(&event.organizer)
         .bind(serde_json::to_string(&event.alarms)?)
+        .bind(&rsvp_str)
         .bind(event.updated_at.to_rfc3339())
         .execute(&self.pool)
         .await?;
 
+        Ok(())
+    }
+
+    pub async fn update_rsvp_status(
+        &self,
+        event_id: Uuid,
+        status: &cove_core::RsvpStatus,
+    ) -> Result<(), StorageError> {
+        let status_str = serde_json::to_string(status)
+            .unwrap_or_else(|_| "\"needs_action\"".to_string())
+            .trim_matches('"')
+            .to_string();
+        sqlx::query("UPDATE calendar_events SET rsvp_status = ?1 WHERE id = ?2")
+            .bind(&status_str)
+            .bind(event_id.to_string())
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -664,6 +1039,45 @@ impl Storage {
             SELECT * FROM reminder_tasks
             WHERE account_id = ?1
             ORDER BY due_at ASC
+            "#,
+        )
+        .bind(account_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(Self::row_to_task).collect()
+    }
+
+    /// List subtasks (tasks with a given parent_id).
+    pub async fn list_subtasks(&self, parent_id: Uuid) -> Result<Vec<ReminderTask>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT * FROM reminder_tasks WHERE parent_id = ?1 ORDER BY priority DESC, due_at ASC",
+        )
+        .bind(parent_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(Self::row_to_task).collect()
+    }
+
+    /// List top-level tasks (no parent) for an account, ordered by priority descending.
+    pub async fn list_tasks_by_priority(
+        &self,
+        account_id: Uuid,
+    ) -> Result<Vec<ReminderTask>, StorageError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT * FROM reminder_tasks
+            WHERE account_id = ?1 AND (parent_id IS NULL OR parent_id = '')
+            ORDER BY
+                CASE priority
+                    WHEN 'critical' THEN 0
+                    WHEN 'high' THEN 1
+                    WHEN 'normal' THEN 2
+                    WHEN 'low' THEN 3
+                    ELSE 4
+                END,
+                due_at ASC
             "#,
         )
         .bind(account_id.to_string())
@@ -848,6 +1262,9 @@ impl Storage {
         let received_raw: String = row.try_get("received_at")?;
         let created_raw: String = row.try_get("created_at")?;
         let updated_raw: String = row.try_get("updated_at")?;
+        let snoozed_raw: Option<String> = row.try_get("snoozed_until").unwrap_or(None);
+        let pinned_raw: i32 = row.try_get("pinned").unwrap_or(0);
+        let send_at_raw: Option<String> = row.try_get("send_at").unwrap_or(None);
 
         Ok(cove_core::MailMessage {
             id: parse_uuid(&id_raw, "mail_messages.id")?,
@@ -902,6 +1319,15 @@ impl Storage {
             received_at: parse_datetime(&received_raw, "mail_messages.received_at")?,
             created_at: parse_datetime(&created_raw, "mail_messages.created_at")?,
             updated_at: parse_datetime(&updated_raw, "mail_messages.updated_at")?,
+            snoozed_until: snoozed_raw
+                .as_deref()
+                .map(|raw| parse_datetime(raw, "mail_messages.snoozed_until"))
+                .transpose()?,
+            pinned: pinned_raw != 0,
+            send_at: send_at_raw
+                .as_deref()
+                .map(|raw| parse_datetime(raw, "mail_messages.send_at"))
+                .transpose()?,
         })
     }
 
@@ -934,6 +1360,11 @@ impl Storage {
                 &row.try_get::<String, _>("alarms_json")?,
                 "calendar_events.alarms_json",
             )?,
+            rsvp_status: row.try_get::<Option<String>, _>("rsvp_status")
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str(&format!("\"{s}\"")).ok())
+                .unwrap_or_default(),
             updated_at: parse_datetime(&updated_raw, "calendar_events.updated_at")?,
         })
     }

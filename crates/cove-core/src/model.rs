@@ -123,6 +123,15 @@ pub struct MailMessage {
     pub received_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Snooze: message reappears after this time.
+    #[serde(default)]
+    pub snoozed_until: Option<DateTime<Utc>>,
+    /// Pinned messages stay at top of list.
+    #[serde(default)]
+    pub pinned: bool,
+    /// Scheduled send time (None = send immediately).
+    #[serde(default)]
+    pub send_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +160,31 @@ pub struct CalendarAlarm {
     pub message: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RsvpStatus {
+    NeedsAction,
+    Accepted,
+    Declined,
+    Tentative,
+}
+
+impl Default for RsvpStatus {
+    fn default() -> Self {
+        Self::NeedsAction
+    }
+}
+
+/// Human-readable recurrence frequencies for the recurrence editor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecurrenceFrequency {
+    Daily,
+    Weekly,
+    Monthly,
+    Yearly,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalendarEvent {
     pub id: Uuid,
@@ -168,6 +202,7 @@ pub struct CalendarEvent {
     pub attendees: Vec<String>,
     pub organizer: Option<String>,
     pub alarms: Vec<CalendarAlarm>,
+    pub rsvp_status: RsvpStatus,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -206,6 +241,97 @@ pub struct ReminderTask {
     pub snoozed_until: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+// ---- Signatures & Templates ----
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailSignature {
+    pub id: Uuid,
+    pub account_id: Option<Uuid>,
+    pub name: String,
+    pub body_html: String,
+    pub body_text: String,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailTemplate {
+    pub id: Uuid,
+    pub name: String,
+    pub subject: String,
+    pub body_html: String,
+    pub body_text: String,
+}
+
+// ---- Rules / Filters ----
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleField {
+    From,
+    To,
+    Subject,
+    Body,
+    HasAttachment,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleOperator {
+    Contains,
+    NotContains,
+    Equals,
+    StartsWith,
+    EndsWith,
+    Matches,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleCondition {
+    pub field: RuleField,
+    pub operator: RuleOperator,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleAction {
+    MoveTo(String),
+    Label(String),
+    MarkRead,
+    Archive,
+    Delete,
+    Pin,
+    Flag,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MailRule {
+    pub id: Uuid,
+    pub account_id: Option<Uuid>,
+    pub name: String,
+    pub enabled: bool,
+    pub conditions: Vec<RuleCondition>,
+    pub match_all: bool,
+    pub actions: Vec<RuleAction>,
+    pub stop_processing: bool,
+    pub order: i32,
+}
+
+// ---- Contacts ----
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Contact {
+    pub id: Uuid,
+    pub account_id: Option<Uuid>,
+    pub email: String,
+    pub display_name: Option<String>,
+    pub phone: Option<String>,
+    pub organization: Option<String>,
+    pub notes: Option<String>,
+    pub last_contacted: Option<DateTime<Utc>>,
+    pub contact_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -285,6 +285,7 @@ impl CalendarBackend for GoogleCalendarBackend {
                     minutes_before: 10,
                     message: Some("Upcoming event".to_string()),
                 }],
+                rsvp_status: cove_core::RsvpStatus::NeedsAction,
                 updated_at: raw
                     .updated
                     .as_deref()
@@ -496,6 +497,7 @@ impl CalendarBackend for MicrosoftGraphCalendarBackend {
                     minutes_before: 10,
                     message: Some("Upcoming event".to_string()),
                 }],
+                rsvp_status: cove_core::RsvpStatus::NeedsAction,
                 updated_at: raw
                     .last_modified
                     .as_deref()
@@ -680,6 +682,7 @@ fn parse_ical_events(account_id: Uuid, calendar_id: &str, ics_payload: &str) -> 
                         minutes_before: 10,
                         message: Some("Upcoming event".to_string()),
                     }],
+                    rsvp_status: cove_core::RsvpStatus::NeedsAction,
                     updated_at: updated_at.unwrap_or_else(Utc::now),
                 });
             }
