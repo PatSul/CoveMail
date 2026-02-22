@@ -1,24 +1,24 @@
 [workspace]
 members = [
   "src-tauri",
-  "crates/aether-native",
-  "crates/aether-core",
-  "crates/aether-config",
-  "crates/aether-security",
-  "crates/aether-storage",
-  "crates/aether-email",
-  "crates/aether-calendar",
-  "crates/aether-tasks",
-  "crates/aether-ai",
+  "crates/cove-native",
+  "crates/cove-core",
+  "crates/cove-config",
+  "crates/cove-security",
+  "crates/cove-storage",
+  "crates/cove-email",
+  "crates/cove-calendar",
+  "crates/cove-tasks",
+  "crates/cove-ai",
 ]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["AegisInbox Contributors"]
+authors = ["Cove Mail Contributors"]
 license = "Apache-2.0"
-repository = "https://github.com/example/aegisinbox"
+repository = "https://github.com/PatSul/CoveMail"
 rust-version = "1.78"
 
 [workspace.dependencies]

@@ -1,11 +1,11 @@
-use aether_ai::{AiRuntimeConfig, AiService, CloudProviderRuntime, LocalRuntime};
-use aether_calendar::CalendarService;
-use aether_config::{AppConfig, ConfigManager};
-use aether_core::{CloudAiProvider, OAuthProfile, Provider, SyncDomain, SyncJob, SyncStatus};
-use aether_email::{EmailService, ProtocolSettings};
-use aether_security::{SecretKey, SecretStore};
-use aether_storage::Storage;
-use aether_tasks::TaskService;
+use cove_ai::{AiRuntimeConfig, AiService, CloudProviderRuntime, LocalRuntime};
+use cove_calendar::CalendarService;
+use cove_config::{AppConfig, ConfigManager};
+use cove_core::{CloudAiProvider, OAuthProfile, Provider, SyncDomain, SyncJob, SyncStatus};
+use cove_email::{EmailService, ProtocolSettings};
+use cove_security::{SecretKey, SecretStore};
+use cove_storage::Storage;
+use cove_tasks::TaskService;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
@@ -42,7 +42,7 @@ impl AppState {
         let config = config_manager.load().context("load app config")?;
 
         let secrets =
-            SecretStore::new_with_legacy("io.aegisinbox.desktop", "io.aether.desktop");
+            SecretStore::new_with_legacy("io.covemail.desktop", "io.aether.desktop");
         let db_key = secrets
             .get(&SecretKey {
                 namespace: "database".to_string(),

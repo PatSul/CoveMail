@@ -1,14 +1,14 @@
 use crate::state::{AppState, PendingOAuthSession};
-use aether_calendar::CalendarSettings;
-use aether_config::AppConfig;
-use aether_core::{
+use cove_calendar::CalendarSettings;
+use cove_config::AppConfig;
+use cove_core::{
     Account, AccountProtocol, AiMode, CloudAiProvider, DataProvenance, OAuthProfile, Provider,
     SearchResult, SyncDomain, SyncJob, SyncStatus,
 };
-use aether_email::{OutgoingMail, ProtocolSettings};
-use aether_security::{OAuthWorkflow, SecretKey, SecretStore};
-use aether_storage::Storage;
-use aether_tasks::NaturalTaskInput;
+use cove_email::{OutgoingMail, ProtocolSettings};
+use cove_security::{OAuthWorkflow, SecretKey, SecretStore};
+use cove_storage::Storage;
+use cove_tasks::NaturalTaskInput;
 use chrono::{Duration, Utc};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -149,7 +149,7 @@ pub struct AiResult {
 
 #[derive(Debug, Serialize)]
 pub struct AiTaskExtractionResult {
-    pub created: Vec<aether_core::ReminderTask>,
+    pub created: Vec<cove_core::ReminderTask>,
     pub provenance: DataProvenance,
 }
 
@@ -639,7 +639,7 @@ fn sync_domain_slot(domain: &SyncDomain) -> u8 {
 pub async fn search_mail(
     state: State<'_, AppState>,
     payload: SearchPayload,
-) -> Result<SearchResult<aether_core::MailMessage>, String> {
+) -> Result<SearchResult<cove_core::MailMessage>, String> {
     state
         .storage
         .search_mail(&payload.query, payload.limit.unwrap_or(50))
@@ -651,7 +651,7 @@ pub async fn search_mail(
 pub async fn list_mail(
     state: State<'_, AppState>,
     payload: ListMailPayload,
-) -> Result<SearchResult<aether_core::MailMessage>, String> {
+) -> Result<SearchResult<cove_core::MailMessage>, String> {
     state
         .storage
         .list_mail_messages(
@@ -668,7 +668,7 @@ pub async fn list_mail(
 pub async fn list_mail_folders(
     state: State<'_, AppState>,
     payload: ListFoldersPayload,
-) -> Result<Vec<aether_core::MailFolder>, String> {
+) -> Result<Vec<cove_core::MailFolder>, String> {
     let account = state
         .storage
         .list_accounts()
@@ -710,7 +710,7 @@ pub async fn list_mail_folders(
 pub async fn list_mail_threads(
     state: State<'_, AppState>,
     payload: ListThreadsPayload,
-) -> Result<Vec<aether_core::MailThreadSummary>, String> {
+) -> Result<Vec<cove_core::MailThreadSummary>, String> {
     state
         .email
         .list_threads(
@@ -727,7 +727,7 @@ pub async fn list_mail_threads(
 pub async fn list_thread_messages(
     state: State<'_, AppState>,
     payload: ThreadMessagesPayload,
-) -> Result<Vec<aether_core::MailMessage>, String> {
+) -> Result<Vec<cove_core::MailMessage>, String> {
     state
         .storage
         .list_thread_messages(payload.account_id, &payload.thread_id)
@@ -739,7 +739,7 @@ pub async fn list_thread_messages(
 pub async fn get_mail_message(
     state: State<'_, AppState>,
     message_id: Uuid,
-) -> Result<Option<aether_core::MailMessage>, String> {
+) -> Result<Option<cove_core::MailMessage>, String> {
     state
         .storage
         .get_mail_message(message_id)
@@ -780,7 +780,7 @@ pub async fn send_mail(state: State<'_, AppState>, payload: SendMailPayload) -> 
 pub async fn list_tasks(
     state: State<'_, AppState>,
     account_id: Uuid,
-) -> Result<Vec<aether_core::ReminderTask>, String> {
+) -> Result<Vec<cove_core::ReminderTask>, String> {
     state
         .storage
         .list_tasks(account_id)
@@ -792,7 +792,7 @@ pub async fn list_tasks(
 pub async fn create_task_from_text(
     state: State<'_, AppState>,
     payload: NaturalTaskPayload,
-) -> Result<aether_core::ReminderTask, String> {
+) -> Result<cove_core::ReminderTask, String> {
     state
         .tasks
         .create_from_natural_language(NaturalTaskInput {
@@ -808,7 +808,7 @@ pub async fn create_task_from_text(
 pub async fn import_calendar_ics(
     state: State<'_, AppState>,
     payload: ImportIcsPayload,
-) -> Result<Vec<aether_core::CalendarEvent>, String> {
+) -> Result<Vec<cove_core::CalendarEvent>, String> {
     state
         .calendar
         .import_ics(
@@ -1019,9 +1019,9 @@ enum JobFailureDisposition {
 #[derive(Clone)]
 struct SyncExecutionContext {
     storage: Storage,
-    email: aether_email::EmailService,
-    calendar: aether_calendar::CalendarService,
-    tasks: aether_tasks::TaskService,
+    email: cove_email::EmailService,
+    calendar: cove_calendar::CalendarService,
+    tasks: cove_tasks::TaskService,
     secrets: SecretStore,
     accounts: Arc<HashMap<Uuid, Account>>,
 }
@@ -1102,7 +1102,7 @@ async fn run_sync_job(
                 .map_err(to_error_string)
         }
         SyncDomain::Tasks => {
-            let mut task_settings: aether_tasks::TaskSettings =
+            let mut task_settings: cove_tasks::TaskSettings =
                 parse_domain_settings(&settings, "tasks").map_err(to_error_string)?;
             hydrate_task_secrets(account.id, &context.secrets, &mut task_settings)?;
             context
@@ -1177,9 +1177,9 @@ async fn fail_or_retry_job(
 
 fn send_sync_notification(app_handle: &tauri::AppHandle, summary: &SyncRunSummary) {
     let title = if summary.failed_jobs > 0 {
-        "AegisInbox sync needs attention"
+        "Cove Mail sync needs attention"
     } else {
-        "AegisInbox sync complete"
+        "Cove Mail sync complete"
     };
 
     let mut parts = Vec::new();
@@ -1277,7 +1277,7 @@ fn hydrate_calendar_secrets(
 fn hydrate_task_secrets(
     account_id: Uuid,
     secrets: &SecretStore,
-    settings: &mut aether_tasks::TaskSettings,
+    settings: &mut cove_tasks::TaskSettings,
 ) -> Result<(), String> {
     if settings.access_token.is_none() {
         settings.access_token = secrets
@@ -1468,7 +1468,7 @@ fn default_settings_for_provider(
     }
 }
 
-fn merge_folders(target: &mut Vec<aether_core::MailFolder>, remote: Vec<aether_core::MailFolder>) {
+fn merge_folders(target: &mut Vec<cove_core::MailFolder>, remote: Vec<cove_core::MailFolder>) {
     let mut by_path = std::collections::BTreeMap::new();
 
     for folder in target.drain(..) {

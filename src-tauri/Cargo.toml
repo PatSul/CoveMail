@@ -1,5 +1,5 @@
 [package]
-name = "aether-tauri"
+name = "cove-tauri"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -11,14 +11,14 @@ rust-version.workspace = true
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-aether-ai = { path = "../crates/aether-ai" }
-aether-calendar = { path = "../crates/aether-calendar" }
-aether-config = { path = "../crates/aether-config" }
-aether-core = { path = "../crates/aether-core" }
-aether-email = { path = "../crates/aether-email" }
-aether-security = { path = "../crates/aether-security" }
-aether-storage = { path = "../crates/aether-storage" }
-aether-tasks = { path = "../crates/aether-tasks" }
+cove-ai = { path = "../crates/cove-ai" }
+cove-calendar = { path = "../crates/cove-calendar" }
+cove-config = { path = "../crates/cove-config" }
+cove-core = { path = "../crates/cove-core" }
+cove-email = { path = "../crates/cove-email" }
+cove-security = { path = "../crates/cove-security" }
+cove-storage = { path = "../crates/cove-storage" }
+cove-tasks = { path = "../crates/cove-tasks" }
 anyhow.workspace = true
 chrono.workspace = true
 serde.workspace = true

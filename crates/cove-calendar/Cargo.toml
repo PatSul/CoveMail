@@ -1,0 +1,25 @@
+[package]
+name = "cove-calendar"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cove-core = { path = "../cove-core" }
+cove-storage = { path = "../cove-storage" }
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+ical.workspace = true
+reqwest.workspace = true
+rrule.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true

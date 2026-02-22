@@ -127,200 +127,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-ai"
-version = "0.1.0"
-dependencies = [
- "aether-core",
- "aether-security",
- "anyhow",
- "async-trait",
- "regex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "aether-calendar"
-version = "0.1.0"
-dependencies = [
- "aether-core",
- "aether-storage",
- "anyhow",
- "async-trait",
- "chrono",
- "chrono-tz 0.10.4",
- "ical",
- "regex",
- "reqwest 0.12.28",
- "rrule",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "aether-config"
-version = "0.1.0"
-dependencies = [
- "aether-core",
- "anyhow",
- "directories",
- "serde",
- "thiserror 1.0.69",
- "toml 0.8.2",
- "tracing",
-]
-
-[[package]]
-name = "aether-core"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "aether-email"
-version = "0.1.0"
-dependencies = [
- "aether-core",
- "aether-storage",
- "ammonia",
- "anyhow",
- "async-trait",
- "base64 0.22.1",
- "chrono",
- "imap",
- "lettre",
- "mailparse",
- "regex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "aether-native"
-version = "0.1.0"
-dependencies = [
- "aether-ai",
- "aether-calendar",
- "aether-config",
- "aether-core",
- "aether-email",
- "aether-security",
- "aether-storage",
- "aether-tasks",
- "age",
- "anyhow",
- "base64 0.22.1",
- "chrono",
- "eframe",
- "egui",
- "enigo",
- "rfd 0.17.2",
- "secrecy 0.10.3",
- "serde",
- "serde_json",
- "tokio",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "aether-security"
-version = "0.1.0"
-dependencies = [
- "aether-core",
- "anyhow",
- "base64 0.22.1",
- "keyring",
- "oauth2",
- "reqwest 0.12.28",
- "serde",
- "thiserror 1.0.69",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "aether-storage"
-version = "0.1.0"
-dependencies = [
- "aether-core",
- "anyhow",
- "chrono",
- "serde",
- "serde_json",
- "sqlx",
- "tantivy",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "aether-tasks"
-version = "0.1.0"
-dependencies = [
- "aether-core",
- "aether-storage",
- "anyhow",
- "async-trait",
- "chrono",
- "chrono-tz 0.10.4",
- "regex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "aether-tauri"
-version = "0.1.0"
-dependencies = [
- "aether-ai",
- "aether-calendar",
- "aether-config",
- "aether-core",
- "aether-email",
- "aether-security",
- "aether-storage",
- "aether-tasks",
- "anyhow",
- "chrono",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-fs",
- "tauri-plugin-notification",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "age"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1387,6 +1193,200 @@ dependencies = [
  "bitflags 2.11.0",
  "core-foundation 0.10.1",
  "libc",
+]
+
+[[package]]
+name = "cove-ai"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "cove-core",
+ "cove-security",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "cove-calendar"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "chrono-tz 0.10.4",
+ "cove-core",
+ "cove-storage",
+ "ical",
+ "regex",
+ "reqwest 0.12.28",
+ "rrule",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "cove-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cove-core",
+ "directories",
+ "serde",
+ "thiserror 1.0.69",
+ "toml 0.8.2",
+ "tracing",
+]
+
+[[package]]
+name = "cove-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "cove-email"
+version = "0.1.0"
+dependencies = [
+ "ammonia",
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "cove-core",
+ "cove-storage",
+ "imap",
+ "lettre",
+ "mailparse",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "cove-native"
+version = "0.1.0"
+dependencies = [
+ "age",
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "cove-ai",
+ "cove-calendar",
+ "cove-config",
+ "cove-core",
+ "cove-email",
+ "cove-security",
+ "cove-storage",
+ "cove-tasks",
+ "eframe",
+ "egui",
+ "enigo",
+ "rfd 0.17.2",
+ "secrecy 0.10.3",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "cove-security"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "cove-core",
+ "keyring",
+ "oauth2",
+ "reqwest 0.12.28",
+ "serde",
+ "thiserror 1.0.69",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "cove-storage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "cove-core",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tantivy",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "cove-tasks"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "chrono-tz 0.10.4",
+ "cove-core",
+ "cove-storage",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "cove-tauri"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "cove-ai",
+ "cove-calendar",
+ "cove-config",
+ "cove-core",
+ "cove-email",
+ "cove-security",
+ "cove-storage",
+ "cove-tasks",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-fs",
+ "tauri-plugin-notification",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

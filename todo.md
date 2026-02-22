@@ -1,4 +1,4 @@
-# AegisInbox TODO
+# Cove Mail TODO
 
 Last updated: 2026-02-19
 

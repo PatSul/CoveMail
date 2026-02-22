@@ -42,7 +42,7 @@ export async function bootstrap(): Promise<BootstrapResponse> {
           default_ai_mode: "local",
         },
         database: {
-          file_name: "aegisinbox.sqlite3",
+          file_name: "covemail.sqlite3",
           sqlcipher_enabled: false,
         },
         sync: {

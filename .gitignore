@@ -16,7 +16,7 @@ src-tauri/gen
 *.db
 *.db-shm
 *.db-wal
-.aether/
+.covemail/
 
 # Build / check output logs
 *.log

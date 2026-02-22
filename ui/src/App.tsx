@@ -75,7 +75,7 @@ const oauthProviders: Array<{ id: Provider; label: string }> = [
   { id: "exchange", label: "Exchange" },
 ];
 
-const THEME_STORAGE_KEY = "aegisinbox.theme_mode";
+const THEME_STORAGE_KEY = "covemail.theme_mode";
 
 function isThemeMode(value: string): value is ThemeMode {
   return themeOptions.some((option) => option.id === value);
@@ -776,7 +776,7 @@ export default function App() {
         <div className="brand">
           <span className="brand-badge">AE</span>
           <div className="brand-copy">
-            <h1>AegisInbox</h1>
+            <h1>Cove Mail</h1>
             <p>Privacy-first personal command center</p>
           </div>
         </div>

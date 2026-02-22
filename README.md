@@ -1,6 +1,6 @@
-# AegisInbox
+# Cove Mail
 
-AegisInbox is a privacy-first, AI-assisted email, calendar, and reminders desktop client built with Rust and Tauri v2.
+Cove Mail is a privacy-first, AI-assisted email, calendar, and reminders desktop client built with Rust and Tauri v2.
 
 ## Privacy Contract
 
@@ -24,15 +24,15 @@ AegisInbox is a privacy-first, AI-assisted email, calendar, and reminders deskto
 ## Repository Layout
 
 - `src-tauri`: Desktop app entrypoint and Tauri command surface
-- `crates/aether-native`: Native Rust (`egui/eframe`) desktop shell
-- `crates/aether-core`: Shared domain models
-- `crates/aether-config`: TOML config manager and defaults
-- `crates/aether-security`: Keychain and OAuth PKCE workflows
-- `crates/aether-storage`: SQLx repositories, migrations, Tantivy integration
-- `crates/aether-email`: Email services and protocol adapters
-- `crates/aether-calendar`: Calendar services + ICS import/export
-- `crates/aether-tasks`: Reminders/tasks and natural language parsing
-- `crates/aether-ai`: Local (llama.cpp) and optional cloud AI providers
+- `crates/cove-native`: Native Rust (`egui/eframe`) desktop shell
+- `crates/cove-core`: Shared domain models
+- `crates/cove-config`: TOML config manager and defaults
+- `crates/cove-security`: Keychain and OAuth PKCE workflows
+- `crates/cove-storage`: SQLx repositories, migrations, Tantivy integration
+- `crates/cove-email`: Email services and protocol adapters
+- `crates/cove-calendar`: Calendar services + ICS import/export
+- `crates/cove-tasks`: Reminders/tasks and natural language parsing
+- `crates/cove-ai`: Local (llama.cpp) and optional cloud AI providers
 - `ui`: React frontend
 
 ## Current Protocol Adapter Coverage
@@ -58,7 +58,7 @@ npm run dev --prefix ui
 cargo tauri dev --manifest-path src-tauri/Cargo.toml
 
 # Native Rust desktop shell (no web frontend)
-cargo run -p aether-native
+cargo run -p cove-native
 ```
 
 ## Security Notes

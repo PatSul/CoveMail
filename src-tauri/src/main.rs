@@ -18,7 +18,7 @@ fn main() {
     init_tracing();
 
     let app_state = tauri::async_runtime::block_on(AppState::initialize())
-        .expect("failed to initialize AegisInbox app state");
+        .expect("failed to initialize Cove Mail app state");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -64,7 +64,7 @@ fn main() {
             commands::ai_fetch_available_models,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running AegisInbox");
+        .expect("error while running Cove Mail");
 }
 
 async fn background_sync_loop(app_handle: tauri::AppHandle) {
