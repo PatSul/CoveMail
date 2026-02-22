@@ -492,6 +492,47 @@ impl Storage {
         })
     }
 
+    // -- attachment content ------------------------------------------------
+
+    pub async fn save_attachment_content(
+        &self,
+        attachment_id: Uuid,
+        message_id: Uuid,
+        account_id: Uuid,
+        content: &[u8],
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            INSERT INTO mail_attachment_content (attachment_id, message_id, account_id, content)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(attachment_id) DO UPDATE SET content = excluded.content
+            "#,
+        )
+        .bind(attachment_id.to_string())
+        .bind(message_id.to_string())
+        .bind(account_id.to_string())
+        .bind(content)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_attachment_content(
+        &self,
+        attachment_id: Uuid,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let row = sqlx::query(
+            "SELECT content FROM mail_attachment_content WHERE attachment_id = ?1",
+        )
+        .bind(attachment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| r.get::<Vec<u8>, _>("content")))
+    }
+
+    // -- calendar ----------------------------------------------------------
+
     pub async fn upsert_calendar_event(&self, event: &CalendarEvent) -> Result<(), StorageError> {
         sqlx::query(
             r#"

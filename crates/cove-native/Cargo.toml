@@ -23,7 +23,10 @@ chrono.workspace = true
 eframe = { version = "0.31", default-features = true }
 egui = "0.31"
 enigo = "0.1"
+notify-rust = "4"
+open = "5"
 rfd = "0.17.2"
+scraper = "0.22"
 secrecy = "0.10.3"
 serde.workspace = true
 serde_json.workspace = true

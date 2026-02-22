@@ -1,4 +1,6 @@
 mod export;
+mod html_render;
+mod notifications;
 
 use cove_ai::{AiRuntimeConfig, AiService, CloudProviderRuntime, LocalRuntime};
 use cove_calendar::{CalendarService, CalendarSettings};
@@ -182,6 +184,14 @@ struct NativeApp {
 
     export_password: String,
     import_password: String,
+
+    // Attachment handling
+    pending_attachment_save: Option<(Uuid, String)>,
+    pending_attachment_open: Option<(Uuid, String)>,
+
+    // Notifications
+    notification_state: notifications::NotificationState,
+    last_notification_check: std::time::Instant,
 }
 impl NativeApp {
     fn initialize() -> anyhow::Result<Self> {
@@ -344,6 +354,10 @@ impl NativeApp {
             ai_cloud_provider: Some(CloudAiProvider::OpenAi),
             export_password: String::new(),
             import_password: String::new(),
+            pending_attachment_save: None,
+            pending_attachment_open: None,
+            notification_state: notifications::NotificationState::new(),
+            last_notification_check: std::time::Instant::now(),
         })
     }
 
@@ -788,7 +802,13 @@ impl NativeApp {
             self.oauth.redirect_url.trim(),
         ) {
             Ok(profile) => {
-                let workflow = OAuthWorkflow::new(profile);
+                let workflow = match OAuthWorkflow::new(profile) {
+                    Ok(w) => w,
+                    Err(err) => {
+                        self.status = format!("OAuth validation failed: {err}");
+                        return;
+                    }
+                };
                 match workflow.begin_pkce_session() {
                     Ok(session) => {
                         self.oauth.auth_url = session.authorization_url;
@@ -817,7 +837,13 @@ impl NativeApp {
             return;
         };
 
-        let workflow = OAuthWorkflow::new(profile);
+        let workflow = match OAuthWorkflow::new(profile) {
+            Ok(w) => w,
+            Err(err) => {
+                self.status = format!("OAuth validation failed: {err}");
+                return;
+            }
+        };
         if self.oauth.expected_state.trim().is_empty() {
             self.status = "OAuth session missing expected state; restart flow".to_string();
             return;
@@ -1109,6 +1135,34 @@ impl eframe::App for NativeApp {
             return;
         }
 
+        // Periodic notification check (every 30 seconds).
+        if self.last_notification_check.elapsed() >= std::time::Duration::from_secs(30) {
+            self.last_notification_check = std::time::Instant::now();
+            let notif_config = &self.config.notifications;
+
+            // New-mail notifications for the current thread list.
+            self.notification_state.check_new_mail(notif_config, &self.thread_messages);
+
+            // Calendar reminder notifications.
+            if let Some(account_id) = self.selected_account {
+                let now = Utc::now();
+                let window_end = now + chrono::Duration::minutes(
+                    *notif_config.reminder_minutes_before.iter().max().unwrap_or(&15) + 1
+                );
+                if let Ok(events) = self.runtime.block_on(
+                    self.storage.list_calendar_events(account_id, now, window_end)
+                ) {
+                    self.notification_state.check_calendar_reminders(notif_config, &events);
+                }
+
+                if let Ok(tasks) = self.runtime.block_on(
+                    self.storage.list_tasks(account_id)
+                ) {
+                    self.notification_state.check_task_reminders(notif_config, &tasks);
+                }
+            }
+        }
+
         egui::TopBottomPanel::top("top").frame(egui::Frame::default().fill(ctx.style().visuals.panel_fill).inner_margin(8.0)).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 for (view, label) in [
@@ -1313,12 +1367,32 @@ impl eframe::App for NativeApp {
                                             if !message.attachments.is_empty() {
                                                 ui.label(egui::RichText::new("Attachments:").strong());
                                                 for attachment in &message.attachments {
-                                                    ui.label(format!("- {} ({} bytes)", attachment.file_name, attachment.size));
+                                                    ui.horizontal(|ui| {
+                                                        let size_str = if attachment.size >= 1_048_576 {
+                                                            format!("{:.1} MB", attachment.size as f64 / 1_048_576.0)
+                                                        } else if attachment.size >= 1024 {
+                                                            format!("{:.0} KB", attachment.size as f64 / 1024.0)
+                                                        } else {
+                                                            format!("{} B", attachment.size)
+                                                        };
+                                                        ui.label(format!("{} ({})", attachment.file_name, size_str));
+                                                        if ui.small_button("Save").clicked() {
+                                                            self.pending_attachment_save = Some((attachment.id, attachment.file_name.clone()));
+                                                        }
+                                                        if ui.small_button("Open").clicked() {
+                                                            self.pending_attachment_open = Some((attachment.id, attachment.file_name.clone()));
+                                                        }
+                                                    });
                                                 }
                                                 ui.add_space(8.0);
                                             }
-                                            let body = message.body_text.as_deref().unwrap_or(&message.preview);
-                                            ui.label(egui::RichText::new(body).size(14.0).line_height(Some(20.0)));
+                                            let rendered = message.body_html.as_deref()
+                                                .map(|html| html_render::render_html(ui, html))
+                                                .unwrap_or(false);
+                                            if !rendered {
+                                                let body = message.body_text.as_deref().unwrap_or(&message.preview);
+                                                ui.label(egui::RichText::new(body).size(14.0).line_height(Some(20.0)));
+                                            }
                                         } else {
                                             ui.label(egui::RichText::new(&message.preview).size(13.0));
                                         }
@@ -1833,6 +1907,53 @@ impl eframe::App for NativeApp {
                 ui.label("Setup your accounts here.");
             }
         });
+
+        // Process pending attachment save/open after UI draw.
+        if let Some((att_id, file_name)) = self.pending_attachment_save.take() {
+            if let Some(path) = rfd::FileDialog::new()
+                .set_file_name(&file_name)
+                .save_file()
+            {
+                match self.runtime.block_on(self.email.get_attachment_content(att_id)) {
+                    Ok(Some(data)) => {
+                        if let Err(e) = std::fs::write(&path, &data) {
+                            self.status = format!("Save failed: {e}");
+                        } else {
+                            self.status = format!("Saved to {}", path.display());
+                        }
+                    }
+                    Ok(None) => {
+                        self.status = "Attachment content not available offline.".to_string();
+                    }
+                    Err(e) => {
+                        self.status = format!("Error loading attachment: {e}");
+                    }
+                }
+            }
+        }
+        if let Some((att_id, file_name)) = self.pending_attachment_open.take() {
+            match self.runtime.block_on(self.email.get_attachment_content(att_id)) {
+                Ok(Some(data)) => {
+                    let tmp_dir = std::env::temp_dir().join("cove-attachments");
+                    let _ = std::fs::create_dir_all(&tmp_dir);
+                    let tmp_path = tmp_dir.join(&file_name);
+                    match std::fs::write(&tmp_path, &data) {
+                        Ok(_) => {
+                            let _ = open::that(&tmp_path);
+                        }
+                        Err(e) => {
+                            self.status = format!("Failed to write temp file: {e}");
+                        }
+                    }
+                }
+                Ok(None) => {
+                    self.status = "Attachment content not available offline.".to_string();
+                }
+                Err(e) => {
+                    self.status = format!("Error loading attachment: {e}");
+                }
+            }
+        }
     }
 }
 

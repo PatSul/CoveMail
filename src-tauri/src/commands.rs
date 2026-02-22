@@ -338,7 +338,7 @@ pub async fn begin_oauth_pkce(
         payload.redirect_url.trim(),
     )?;
 
-    let workflow = OAuthWorkflow::new(profile.clone());
+    let workflow = OAuthWorkflow::new(profile.clone()).map_err(to_error_string)?;
     let session = workflow.begin_pkce_session().map_err(to_error_string)?;
 
     let display_name = payload
@@ -392,7 +392,7 @@ pub async fn complete_oauth_pkce(
         return Err("OAuth state mismatch".to_string());
     }
 
-    let workflow = OAuthWorkflow::new(session.oauth_profile.clone());
+    let workflow = OAuthWorkflow::new(session.oauth_profile.clone()).map_err(to_error_string)?;
     let token = workflow
         .exchange_code(payload.code.trim(), &session.pkce_verifier)
         .await

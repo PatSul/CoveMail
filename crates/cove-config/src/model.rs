@@ -11,6 +11,8 @@ pub struct AppConfig {
     pub sync: SyncConfig,
     pub ai: AiConfig,
     pub ui: UiConfig,
+    #[serde(default)]
+    pub notifications: NotificationConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +73,31 @@ pub struct UiConfig {
     pub compact_density: bool,
     pub default_start_page: String,
     pub timezone: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationConfig {
+    pub new_mail_enabled: bool,
+    pub new_mail_sound: bool,
+    pub reminder_enabled: bool,
+    pub reminder_minutes_before: Vec<i64>,
+    pub quiet_hours_enabled: bool,
+    pub quiet_hours_start: String,
+    pub quiet_hours_end: String,
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            new_mail_enabled: true,
+            new_mail_sound: false,
+            reminder_enabled: true,
+            reminder_minutes_before: vec![15, 5],
+            quiet_hours_enabled: false,
+            quiet_hours_start: "22:00".to_string(),
+            quiet_hours_end: "08:00".to_string(),
+        }
+    }
 }
 
 impl Default for AppConfig {
@@ -173,6 +200,7 @@ impl Default for AppConfig {
                 default_start_page: "inbox".to_string(),
                 timezone: None,
             },
+            notifications: NotificationConfig::default(),
         }
     }
 }

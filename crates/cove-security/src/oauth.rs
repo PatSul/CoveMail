@@ -6,18 +6,38 @@ use oauth2::{
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OAuthPkceSession {
     pub authorization_url: String,
     pub csrf_state: String,
     pub pkce_verifier: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl std::fmt::Debug for OAuthPkceSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthPkceSession")
+            .field("authorization_url", &self.authorization_url)
+            .field("csrf_state", &"[REDACTED]")
+            .field("pkce_verifier", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OAuthTokenResult {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub expires_in_secs: Option<u64>,
+}
+
+impl std::fmt::Debug for OAuthTokenResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthTokenResult")
+            .field("access_token", &"[REDACTED]")
+            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "[REDACTED]"))
+            .field("expires_in_secs", &self.expires_in_secs)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -25,9 +45,76 @@ pub struct OAuthWorkflow {
     profile: OAuthProfile,
 }
 
+/// Known overly-broad scopes that should be rejected.
+const DANGEROUS_SCOPES: &[&str] = &["*", "admin", "root", "full_access"];
+
 impl OAuthWorkflow {
-    pub fn new(profile: OAuthProfile) -> Self {
-        Self { profile }
+    /// Create a new OAuth workflow, validating the profile for security issues.
+    pub fn new(profile: OAuthProfile) -> Result<Self, SecurityError> {
+        Self::validate_profile(&profile)?;
+        Ok(Self { profile })
+    }
+
+    /// Validate an OAuth profile for security before use.
+    fn validate_profile(profile: &OAuthProfile) -> Result<(), SecurityError> {
+        // Enforce HTTPS on auth and token endpoints.
+        if profile.auth_url.scheme() != "https" {
+            return Err(SecurityError::OAuth(
+                "Authorization URL must use HTTPS".to_string(),
+            ));
+        }
+        if profile.token_url.scheme() != "https" {
+            return Err(SecurityError::OAuth(
+                "Token URL must use HTTPS".to_string(),
+            ));
+        }
+
+        // Redirect URL must be localhost for desktop apps.
+        let redirect_host = profile.redirect_url.host_str().unwrap_or("");
+        let is_localhost = redirect_host == "127.0.0.1"
+            || redirect_host == "localhost"
+            || redirect_host == "[::1]";
+        if !is_localhost {
+            return Err(SecurityError::OAuth(
+                "Redirect URL must point to localhost (127.0.0.1 or localhost) for desktop apps"
+                    .to_string(),
+            ));
+        }
+
+        // Client ID basic validation.
+        let client_id = profile.client_id.trim();
+        if client_id.is_empty() {
+            return Err(SecurityError::OAuth("Client ID is required".to_string()));
+        }
+        if client_id.len() > 512 {
+            return Err(SecurityError::OAuth(
+                "Client ID appears invalid (too long)".to_string(),
+            ));
+        }
+
+        // Reject dangerous scopes.
+        for scope in &profile.scopes {
+            let lower = scope.to_lowercase();
+            if DANGEROUS_SCOPES.iter().any(|&d| lower == d) {
+                return Err(SecurityError::OAuth(format!(
+                    "Scope '{scope}' is too broad and not allowed"
+                )));
+            }
+        }
+
+        // Auth and token endpoints must have a valid host.
+        if profile.auth_url.host_str().is_none() {
+            return Err(SecurityError::OAuth(
+                "Authorization URL must have a valid host".to_string(),
+            ));
+        }
+        if profile.token_url.host_str().is_none() {
+            return Err(SecurityError::OAuth(
+                "Token URL must have a valid host".to_string(),
+            ));
+        }
+
+        Ok(())
     }
 
     pub fn begin_pkce_session(&self) -> Result<OAuthPkceSession, SecurityError> {

@@ -20,7 +20,7 @@ use std::time::Duration;
 use tokio::task;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ProtocolSettings {
     pub imap_host: Option<String>,
     pub imap_port: Option<u16>,
@@ -31,6 +31,22 @@ pub struct ProtocolSettings {
     pub access_token: Option<String>,
     pub password: Option<String>,
     pub offline_sync_limit: Option<cove_core::OfflineSyncLimit>,
+}
+
+impl std::fmt::Debug for ProtocolSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProtocolSettings")
+            .field("imap_host", &self.imap_host)
+            .field("imap_port", &self.imap_port)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("endpoint", &self.endpoint)
+            .field("username", &self.username)
+            .field("access_token", &self.access_token.as_ref().map(|_| "[REDACTED]"))
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("offline_sync_limit", &self.offline_sync_limit)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +70,13 @@ pub struct OutgoingMail {
     pub attachments: Vec<OutgoingAttachment>,
 }
 
+/// Messages plus pre-extracted attachment content returned by [`EmailBackend::fetch_recent`].
+pub struct FetchResult {
+    pub messages: Vec<MailMessage>,
+    /// `(attachment_id, message_id, raw_bytes)` for every attachment whose content was available.
+    pub attachment_content: Vec<(Uuid, Uuid, Vec<u8>)>,
+}
+
 #[async_trait]
 pub trait EmailBackend: Send + Sync {
     async fn sync_folders(
@@ -68,7 +91,7 @@ pub trait EmailBackend: Send + Sync {
         settings: &ProtocolSettings,
         folder_path: &str,
         limit: usize,
-    ) -> Result<Vec<MailMessage>, EmailError>;
+    ) -> Result<FetchResult, EmailError>;
 
     async fn send_mail(
         &self,
@@ -114,7 +137,7 @@ impl EmailBackend for ImapSmtpBackend {
         settings: &ProtocolSettings,
         folder_path: &str,
         limit: usize,
-    ) -> Result<Vec<MailMessage>, EmailError> {
+    ) -> Result<FetchResult, EmailError> {
         if account.provider == Provider::Gmail {
             return fetch_recent_gmail(account, settings, folder_path, limit).await;
         }
@@ -312,7 +335,7 @@ impl EmailBackend for EwsBackend {
         settings: &ProtocolSettings,
         folder_path: &str,
         limit: usize,
-    ) -> Result<Vec<MailMessage>, EmailError> {
+    ) -> Result<FetchResult, EmailError> {
         let endpoint = settings
             .endpoint
             .as_deref()
@@ -364,7 +387,10 @@ impl EmailBackend for EwsBackend {
         }
 
         let text = response.text().await?;
-        Ok(parse_ews_messages(account.id, folder_path, &text))
+        Ok(FetchResult {
+            messages: parse_ews_messages(account.id, folder_path, &text),
+            attachment_content: Vec::new(), // EWS attachment content not yet implemented
+        })
     }
 
     async fn send_mail(
@@ -495,7 +521,7 @@ impl EmailBackend for JmapBackend {
         settings: &ProtocolSettings,
         folder_path: &str,
         limit: usize,
-    ) -> Result<Vec<MailMessage>, EmailError> {
+    ) -> Result<FetchResult, EmailError> {
         let (api_url, mail_account, _) = jmap_session(&self.http, settings).await?;
         
         let mut filter = serde_json::json!({
@@ -536,7 +562,10 @@ impl EmailBackend for JmapBackend {
         )
         .await?;
 
-        Ok(parse_jmap_messages(account.id, folder_path, &response))
+        Ok(FetchResult {
+            messages: parse_jmap_messages(account.id, folder_path, &response),
+            attachment_content: Vec::new(), // JMAP attachment content not yet implemented
+        })
     }
 
     async fn send_mail(
@@ -747,7 +776,7 @@ async fn fetch_recent_gmail(
     settings: &ProtocolSettings,
     folder_path: &str,
     limit: usize,
-) -> Result<Vec<MailMessage>, EmailError> {
+) -> Result<FetchResult, EmailError> {
     let token = settings
         .access_token
         .as_ref()
@@ -781,6 +810,7 @@ async fn fetch_recent_gmail(
 
     let list_payload: GmailListMessagesResponse = list.json().await?;
     let mut messages = Vec::new();
+    let mut all_attachment_content: Vec<(Uuid, Uuid, Vec<u8>)> = Vec::new();
 
     for item in list_payload.messages.unwrap_or_default() {
         let detail = client
@@ -823,7 +853,7 @@ async fn fetch_recent_gmail(
         });
 
         let label_ids = payload.label_ids.unwrap_or_default();
-        let attachments = extract_attachments(&parsed);
+        let (attachments, att_content) = extract_attachments(&parsed);
         let sent_at = parsed_message_date(&parsed);
         let received_at = payload
             .internal_date
@@ -832,8 +862,13 @@ async fn fetch_recent_gmail(
             .or(sent_at)
             .unwrap_or(now);
 
+        let msg_id = Uuid::new_v4();
+        for (att_id, bytes) in att_content {
+            all_attachment_content.push((att_id, msg_id, bytes));
+        }
+
         let message = MailMessage {
-            id: Uuid::new_v4(),
+            id: msg_id,
             account_id: account.id,
             remote_id: payload.id.clone(),
             thread_id: payload
@@ -869,7 +904,10 @@ async fn fetch_recent_gmail(
         messages.push(message);
     }
 
-    Ok(messages)
+    Ok(FetchResult {
+        messages,
+        attachment_content: all_attachment_content,
+    })
 }
 
 fn decode_gmail_raw(raw: &str) -> Result<Vec<u8>, EmailError> {
@@ -970,13 +1008,18 @@ fn extract_html_body(mail: &ParsedMail<'_>) -> Option<String> {
     None
 }
 
-fn extract_attachments(mail: &ParsedMail<'_>) -> Vec<MailAttachment> {
+fn extract_attachments(mail: &ParsedMail<'_>) -> (Vec<MailAttachment>, Vec<(Uuid, Vec<u8>)>) {
     let mut attachments = Vec::new();
-    collect_attachments(mail, &mut attachments);
-    attachments
+    let mut contents = Vec::new();
+    collect_attachments(mail, &mut attachments, &mut contents);
+    (attachments, contents)
 }
 
-fn collect_attachments(mail: &ParsedMail<'_>, attachments: &mut Vec<MailAttachment>) {
+fn collect_attachments(
+    mail: &ParsedMail<'_>,
+    attachments: &mut Vec<MailAttachment>,
+    contents: &mut Vec<(Uuid, Vec<u8>)>,
+) {
     if mail.subparts.is_empty() {
         let disposition = header_value(mail, "Content-Disposition")
             .unwrap_or_default()
@@ -986,23 +1029,24 @@ fn collect_attachments(mail: &ParsedMail<'_>, attachments: &mut Vec<MailAttachme
             || (disposition.contains("inline") && name.is_some());
 
         if is_attachment {
-            let body_len = mail
-                .get_body_raw()
-                .map(|body| body.len() as u64)
-                .unwrap_or(0);
+            let raw_body = mail.get_body_raw().unwrap_or_default();
+            let id = Uuid::new_v4();
             attachments.push(MailAttachment {
-                id: Uuid::new_v4(),
+                id,
                 file_name: name.unwrap_or_else(|| "attachment.bin".to_string()),
                 mime_type: mail.ctype.mimetype.clone(),
-                size: body_len,
+                size: raw_body.len() as u64,
                 inline: disposition.contains("inline"),
             });
+            if !raw_body.is_empty() {
+                contents.push((id, raw_body));
+            }
         }
         return;
     }
 
     for part in &mail.subparts {
-        collect_attachments(part, attachments);
+        collect_attachments(part, attachments, contents);
     }
 }
 
@@ -1102,7 +1146,7 @@ fn fetch_recent_imap(
     settings: &ProtocolSettings,
     folder_path: &str,
     limit: usize,
-) -> Result<Vec<MailMessage>, EmailError> {
+) -> Result<FetchResult, EmailError> {
     let mut session = connect_imap_session(settings, &provider)?;
     let mailbox = session.select(folder_path).map_err(imap_error_to_email)?;
     let _ = mailbox; // Kept to ensure mailbox selection succeeded
@@ -1115,7 +1159,7 @@ fn fetch_recent_imap(
         let uids = session.uid_search(format!("SINCE {}", date_str)).map_err(imap_error_to_email)?;
         if uids.is_empty() {
             let _ = session.logout();
-            return Ok(Vec::new());
+            return Ok(FetchResult { messages: Vec::new(), attachment_content: Vec::new() });
         }
         
         // Convert the set of UIDs to a comma-separated string, taking up to `limit` many
@@ -1128,7 +1172,7 @@ fn fetch_recent_imap(
     } else {
         if mailbox.exists == 0 {
             let _ = session.logout();
-            return Ok(Vec::new());
+            return Ok(FetchResult { messages: Vec::new(), attachment_content: Vec::new() });
         }
         let start = if mailbox.exists > limit as u32 {
             mailbox.exists - limit as u32 + 1
@@ -1143,6 +1187,7 @@ fn fetch_recent_imap(
         .map_err(imap_error_to_email)?;
 
     let mut messages = Vec::new();
+    let mut all_attachment_content = Vec::new();
     for fetched in fetches.iter() {
         let body = match fetched.body() {
             Some(body) => body,
@@ -1187,8 +1232,14 @@ fn fetch_recent_imap(
             .or(sent_at)
             .unwrap_or_else(Utc::now);
 
+        let (attachments, att_content) = extract_attachments(&parsed);
+        let msg_id = Uuid::new_v4();
+        for (att_id, bytes) in att_content {
+            all_attachment_content.push((att_id, msg_id, bytes));
+        }
+
         messages.push(MailMessage {
-            id: Uuid::new_v4(),
+            id: msg_id,
             account_id,
             remote_id: fetched
                 .uid
@@ -1208,7 +1259,7 @@ fn fetch_recent_imap(
             flags,
             labels: Vec::new(),
             headers,
-            attachments: extract_attachments(&parsed),
+            attachments,
             sent_at,
             received_at,
             created_at: Utc::now(),
@@ -1217,7 +1268,10 @@ fn fetch_recent_imap(
     }
 
     let _ = session.logout();
-    Ok(messages)
+    Ok(FetchResult {
+        messages,
+        attachment_content: all_attachment_content,
+    })
 }
 
 fn start_idle_imap(

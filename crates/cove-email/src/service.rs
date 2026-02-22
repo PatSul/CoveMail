@@ -11,7 +11,11 @@ use chrono::{TimeZone, Utc};
 use mailparse::{parse_mail, ParsedMail};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use tokio::sync::{Mutex, Semaphore};
 use uuid::Uuid;
+
+/// Maximum concurrent sync operations per mail-server domain.
+const MAX_CONCURRENT_PER_DOMAIN: usize = 2;
 
 #[derive(Clone)]
 pub struct EmailService {
@@ -19,6 +23,7 @@ pub struct EmailService {
     imap_smtp: Arc<ImapSmtpBackend>,
     ews: Arc<EwsBackend>,
     jmap: Arc<JmapBackend>,
+    domain_semaphores: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
 }
 
 impl EmailService {
@@ -28,7 +33,26 @@ impl EmailService {
             imap_smtp: Arc::new(ImapSmtpBackend),
             ews: Arc::new(EwsBackend::new()),
             jmap: Arc::new(JmapBackend::new()),
+            domain_semaphores: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Acquire a permit for the given server domain, limiting concurrency.
+    async fn acquire_domain_permit(&self, settings: &ProtocolSettings) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let domain = settings.imap_host.as_deref()
+            .or(settings.smtp_host.as_deref())
+            .or(settings.endpoint.as_deref())
+            .unwrap_or("unknown")
+            .to_lowercase();
+
+        let sem = {
+            let mut map = self.domain_semaphores.lock().await;
+            map.entry(domain)
+                .or_insert_with(|| Arc::new(Semaphore::new(MAX_CONCURRENT_PER_DOMAIN)))
+                .clone()
+        };
+
+        sem.acquire_owned().await.ok()
     }
 
     pub async fn sync_folders(
@@ -36,6 +60,7 @@ impl EmailService {
         account: &Account,
         settings: &ProtocolSettings,
     ) -> Result<Vec<MailFolder>, EmailError> {
+        let _permit = self.acquire_domain_permit(settings).await;
         self.backend_for(account)
             .sync_folders(account, settings)
             .await
@@ -48,14 +73,22 @@ impl EmailService {
         folder_path: &str,
         limit: usize,
     ) -> Result<usize, EmailError> {
+        let _permit = self.acquire_domain_permit(settings).await;
         let backend = self.backend_for(account);
-        let messages = backend
+        let result = backend
             .fetch_recent(account, settings, folder_path, limit)
             .await?;
 
-        self.storage.upsert_mail_messages(&messages).await?;
+        self.storage.upsert_mail_messages(&result.messages).await?;
 
-        Ok(messages.len())
+        for (att_id, msg_id, content) in &result.attachment_content {
+            let _ = self
+                .storage
+                .save_attachment_content(*att_id, *msg_id, account.id, content)
+                .await;
+        }
+
+        Ok(result.messages.len())
     }
 
     pub async fn send(
@@ -64,6 +97,7 @@ impl EmailService {
         settings: &ProtocolSettings,
         outgoing: &OutgoingMail,
     ) -> Result<(), EmailError> {
+        let _permit = self.acquire_domain_permit(settings).await;
         self.backend_for(account)
             .send_mail(account, settings, outgoing)
             .await
@@ -115,8 +149,11 @@ impl EmailService {
             .and_then(|date| mailparse::dateparse(&date).ok())
             .and_then(|timestamp| Utc.timestamp_opt(timestamp, 0).single());
 
+        let (attachments, att_content) = extract_attachments(&parsed);
+        let msg_id = Uuid::new_v4();
+
         let message = MailMessage {
-            id: Uuid::new_v4(),
+            id: msg_id,
             account_id,
             remote_id: remote_id.to_string(),
             thread_id: thread_id_from_headers(&headers, &message_id),
@@ -133,7 +170,7 @@ impl EmailService {
             flags: cove_core::MailFlags::default(),
             labels: vec![],
             headers,
-            attachments: extract_attachments(&parsed),
+            attachments,
             sent_at,
             received_at: sent_at.unwrap_or(now),
             created_at: now,
@@ -141,6 +178,12 @@ impl EmailService {
         };
 
         self.storage.upsert_mail_message(&message).await?;
+        for (att_id, content) in att_content {
+            let _ = self
+                .storage
+                .save_attachment_content(att_id, msg_id, account_id, &content)
+                .await;
+        }
         Ok(message)
     }
 
@@ -272,6 +315,13 @@ impl EmailService {
         Ok(summaries)
     }
 
+    pub async fn get_attachment_content(
+        &self,
+        attachment_id: Uuid,
+    ) -> Result<Option<Vec<u8>>, EmailError> {
+        Ok(self.storage.get_attachment_content(attachment_id).await?)
+    }
+
     fn backend_for(&self, account: &Account) -> Arc<dyn EmailBackend> {
         match default_protocol_for_provider(&account.provider) {
             "ews" => self.ews.clone(),
@@ -364,13 +414,18 @@ fn parse_address_list(raw: Option<String>) -> Vec<MailAddress> {
         .collect()
 }
 
-fn extract_attachments(mail: &ParsedMail<'_>) -> Vec<MailAttachment> {
+fn extract_attachments(mail: &ParsedMail<'_>) -> (Vec<MailAttachment>, Vec<(Uuid, Vec<u8>)>) {
     let mut attachments = Vec::new();
-    collect_attachments(mail, &mut attachments);
-    attachments
+    let mut contents = Vec::new();
+    collect_attachments(mail, &mut attachments, &mut contents);
+    (attachments, contents)
 }
 
-fn collect_attachments(mail: &ParsedMail<'_>, attachments: &mut Vec<MailAttachment>) {
+fn collect_attachments(
+    mail: &ParsedMail<'_>,
+    attachments: &mut Vec<MailAttachment>,
+    contents: &mut Vec<(Uuid, Vec<u8>)>,
+) {
     if mail.subparts.is_empty() {
         let disposition = header_value(mail, "Content-Disposition")
             .unwrap_or_default()
@@ -380,23 +435,24 @@ fn collect_attachments(mail: &ParsedMail<'_>, attachments: &mut Vec<MailAttachme
             || (disposition.contains("inline") && name.is_some());
 
         if is_attachment {
-            let body_len = mail
-                .get_body_raw()
-                .map(|body| body.len() as u64)
-                .unwrap_or(0);
+            let raw_body = mail.get_body_raw().unwrap_or_default();
+            let id = Uuid::new_v4();
             attachments.push(MailAttachment {
-                id: Uuid::new_v4(),
+                id,
                 file_name: name.unwrap_or_else(|| "attachment.bin".to_string()),
                 mime_type: mail.ctype.mimetype.clone(),
-                size: body_len,
+                size: raw_body.len() as u64,
                 inline: disposition.contains("inline"),
             });
+            if !raw_body.is_empty() {
+                contents.push((id, raw_body));
+            }
         }
         return;
     }
 
     for part in &mail.subparts {
-        collect_attachments(part, attachments);
+        collect_attachments(part, attachments, contents);
     }
 }
 
