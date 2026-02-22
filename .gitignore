@@ -1,0 +1,38 @@
+# Rust / Cargo
+/target
+**/*.rs.bk
+
+# Node
+ui/node_modules
+ui/dist
+
+# Tauri
+src-tauri/target
+src-tauri/gen
+
+# Secrets and local data
+.env
+.env.*
+*.db
+*.db-shm
+*.db-wal
+.aether/
+
+# Build / check output logs
+*.log
+*.txt
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!tsconfig.node.json
+!rust-toolchain.toml
+
+# CLI build target
+/target-cli
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
