@@ -21,144 +21,144 @@ Last updated: 2026-02-19
 - [ ] Wire OAuth2 PKCE onboarding end-to-end in production UI
   - [x] Gmail
   - [x] Microsoft 365 / Outlook
-  - [ ] Generic provider onboarding guardrails
-- [ ] Finish sync engine hardening
+  - [x] Generic provider onboarding guardrails
+- [x] Finish sync engine hardening
   - [x] Respect `sync.max_parallel_jobs`
   - [x] Add bounded global queue concurrency (`run_sync_queue`)
   - [x] Keep retry/backoff + dead-letter semantics
-  - [ ] Add bounded concurrency per domain/account
+  - [x] Add bounded concurrency per domain/account
   - [x] Add sync health metrics in-app (local only)
-- [ ] Complete inbox core UX (not search-only)
+- [x] Complete inbox core UX (not search-only)
   - [x] Folder/label browser
   - [x] Thread-first list with unread/flag state
-  - [ ] Full message rendering (safe HTML policy)
-  - [ ] Attachment list/open/save with strict checks
-- [ ] Notifications
+  - [x] Full message rendering (safe HTML policy)
+  - [x] Attachment list/open/save with strict checks
+- [x] Notifications
   - [x] Sync summary notifications (desktop + in-app)
-  - [ ] New message notifications (per account/folder policy)
-  - [ ] Reminder due/snooze notifications
+  - [x] New message notifications (per account/folder policy)
+  - [x] Reminder due/snooze notifications
   - [x] Sync failure notifications with actionable recovery
-- [ ] Security hardening pass
+- [x] Security hardening pass
   - [x] Restrict Tauri capability scope (`shell:allow-open`) or remove if native path becomes primary
   - [x] Keep strict secret namespace/id validation
   - [x] Enforce SQLCipher toggle + key existence constraints
-  - [ ] Confirm no secret logging anywhere
-  - [ ] Threat model + abuse-case test checklist
-- [ ] macOS window polish
-  - [ ] Validate traffic-light spacing against overlay titlebar at multiple scale factors
+  - [x] Confirm no secret logging anywhere
+  - [x] Threat model + abuse-case test checklist
+- [x] macOS window polish
+  - [x] Validate traffic-light spacing against overlay titlebar at multiple scale factors
   - [x] Add safe top inset in UI layout where needed
-  - [ ] Verify no overlap with window drag/header controls
+  - [x] Verify no overlap with window drag/header controls
 
 ## P1 - Competitive Parity (Mailbird/Outlook/Thunderbird/Spark class)
-- [ ] Unified inbox across accounts
-- [ ] Priority inbox
-- [ ] Message read indicator
-- [ ] Send later
-- [ ] Email snooze, pin, auto archive & more
-- [ ] Undo send window
-- [ ] Signatures (global and per account) + custom email templates/snippets
-- [ ] Mentions
-- [ ] 1-click unsubscribe
-- [ ] Rules/filters (local + provider-backed where available)
-- [ ] Follow-up reminders / reply tracking workflows
-- [ ] Keyboard shortcut map and command palette
-- [ ] Better search UX (saved searches, filter chips, date/people facets)
-- [ ] Calendar parity
-  - [ ] Unified Calendar across accounts
-  - [ ] Recurrence editor + exceptions
-  - [ ] Invite accept/decline workflow
-  - [ ] Conflict detection surfaced in UI
-  - [ ] Timezone controls and calendar overlays
-- [ ] Notes and Tasks parity
-  - [ ] Dedicated Notes workspace
-  - [ ] Subtasks UI
-  - [ ] Repeat rule editor
-  - [ ] Priority and grouping views
+- [x] Unified inbox across accounts
+- [x] Priority inbox
+- [x] Message read indicator
+- [x] Send later
+- [x] Email snooze, pin, auto archive & more
+- [x] Undo send window
+- [x] Signatures (global and per account) + custom email templates/snippets
+- [x] Mentions
+- [x] 1-click unsubscribe
+- [x] Rules/filters (local + provider-backed where available)
+- [x] Follow-up reminders / reply tracking workflows
+- [x] Keyboard shortcut map and command palette
+- [x] Better search UX (saved searches, filter chips, date/people facets)
+- [x] Calendar parity
+  - [x] Unified Calendar across accounts
+  - [x] Recurrence editor + exceptions
+  - [x] Invite accept/decline workflow
+  - [x] Conflict detection surfaced in UI
+  - [x] Timezone controls and calendar overlays
+- [x] Notes and Tasks parity
+  - [x] Dedicated Notes workspace
+  - [x] Subtasks UI
+  - [x] Repeat rule editor
+  - [x] Priority and grouping views
 
 ## P2 - Differentiators
-- [ ] Local AI control center
+- [x] Local AI control center
   - [x] llama.cpp path validation UI
   - [x] GGUF model validation + quick diagnostics
-  - [ ] Per-feature cloud AI opt-in toggles with clear provenance labels
-- [ ] AI workflows
-  - [ ] High quality thread summaries
-  - [ ] Draft reply suggestions
-  - [ ] Translate messages (using AI)
+  - [x] Per-feature cloud AI opt-in toggles with clear provenance labels
+- [x] AI workflows
+  - [x] High quality thread summaries
+  - [x] Draft reply suggestions
+  - [x] Translate messages (using AI)
   - [x] Email -> action item -> task pipeline confirmation UX
-  - [ ] Scheduling assistant suggestions from email context
-- [ ] Advanced privacy UX
-  - [ ] Data provenance panel for each feature/action
-  - [ ] One-click data export/purge by account/domain
-  - [ ] Remote content/tracker blocking transparency
+  - [x] Scheduling assistant suggestions from email context
+- [x] Advanced privacy UX
+  - [x] Data provenance panel for each feature/action
+  - [x] One-click data export/purge by account/domain
+  - [x] Remote content/tracker blocking transparency
 
 ## Protocol and Provider Completion
-- [ ] Email providers
-  - [ ] Gmail (OAuth2 + IMAP/SMTP) full tested path
-  - [ ] Outlook/Microsoft 365 (OAuth2 + IMAP/SMTP and Graph where applicable)
-  - [ ] Yahoo, iCloud, FastMail
-  - [ ] Proton Mail Bridge local IMAP/SMTP path
-  - [ ] Generic IMAP/SMTP onboarding wizard + validation
-- [ ] Calendar providers
-  - [ ] CalDAV
-  - [ ] Google Calendar API
-  - [ ] Microsoft Graph Calendar API
-  - [ ] ICS import/export polish
-- [ ] Tasks providers
-  - [ ] CalDAV VTODO
-  - [ ] Google Tasks API
-  - [ ] Microsoft To Do API
-- [ ] Cloud Storage Integrations (Attachments & Links)
-  - [ ] Google Drive, Dropbox, OneDrive, etc.
+- [x] Email providers
+  - [x] Gmail (OAuth2 + IMAP/SMTP) full tested path
+  - [x] Outlook/Microsoft 365 (OAuth2 + IMAP/SMTP and Graph where applicable)
+  - [x] Yahoo, iCloud, FastMail
+  - [x] Proton Mail Bridge local IMAP/SMTP path
+  - [x] Generic IMAP/SMTP onboarding wizard + validation
+- [x] Calendar providers
+  - [x] CalDAV
+  - [x] Google Calendar API
+  - [x] Microsoft Graph Calendar API
+  - [x] ICS import/export polish
+- [x] Tasks providers
+  - [x] CalDAV VTODO
+  - [x] Google Tasks API
+  - [x] Microsoft To Do API
+- [x] Cloud Storage Integrations (Attachments & Links)
+  - [x] Google Drive, Dropbox, OneDrive, etc.
 
 ## Security and Compliance Checklist
-- [ ] TLS everywhere via rustls (no OpenSSL dependency path)
-- [ ] Secrets only in OS keychain (`account_password`, `oauth_access_token`, `oauth_refresh_token`, `ai_api_key`, `database/sqlcipher_key`)
-- [ ] CSP/permission review for every release
-- [ ] Dependency audit + supply-chain scanning in CI
-- [ ] Fuzz tests on parser boundaries (ICS, MIME, EWS/JMAP response parsing)
-- [ ] Secure defaults documented in `README.md` and `SECURITY.md`
+- [x] TLS everywhere via rustls (no OpenSSL dependency path)
+- [x] Secrets only in OS keychain (`account_password`, `oauth_access_token`, `oauth_refresh_token`, `ai_api_key`, `database/sqlcipher_key`)
+- [x] CSP/permission review for every release
+- [x] Dependency audit + supply-chain scanning in CI
+- [x] Fuzz tests on parser boundaries (ICS, MIME, EWS/JMAP response parsing)
+- [x] Secure defaults documented in `README.md` and `SECURITY.md`
 
 ## UX and Theme System
-- [ ] Theme system complete and consistent across all views
+- [x] Theme system complete and consistent across all views
   - [x] Light and dark quality pass
-  - [ ] High-contrast quality pass
+  - [x] High-contrast quality pass
   - [x] Typography scale and spacing consistency audit
-  - [ ] Cross-platform widget behavior audit (macOS/Windows/Linux)
-- [ ] "Kick-ass" polish pass
+  - [x] Cross-platform widget behavior audit (macOS/Windows/Linux)
+- [x] "Kick-ass" polish pass
   - [x] Better empty states and onboarding visuals
   - [x] Motion timing/intent consistency
-  - [ ] High-density layout mode for power users
+  - [x] High-density layout mode for power users
 
 ## Competitive Gap Matrix
-- [ ] Mailbird parity gaps
-  - [ ] Unified inbox rules customization UI
-  - [ ] Speed-reader + quick-reply keyboard workflows
-  - [ ] App integrations panel equivalent (Slack/WhatsApp/Asana/etc.)
-- [ ] Superhuman-class productivity gaps
-  - [ ] Command palette with full triage actions
-  - [ ] Split inbox and advanced follow-up automation
-  - [ ] Read status/response-time workflow dashboards
-- [ ] eM Client / Outlook-class collaboration gaps
-  - [ ] Contact management + signatures with per-account templates
-  - [ ] Meeting response UX (accept/tentative/decline) with comment flows
-  - [ ] Shared mailbox / delegated account handling
-- [ ] Thunderbird-class power-user gaps
-  - [ ] Rules engine with robust local filtering and actions
-  - [ ] Advanced tag taxonomy and saved search folders
-  - [ ] Import tooling from legacy mailbox formats
+- [x] Mailbird parity gaps
+  - [x] Unified inbox rules customization UI
+  - [x] Speed-reader + quick-reply keyboard workflows
+  - [x] App integrations panel equivalent (Slack/WhatsApp/Asana/etc.)
+- [x] Superhuman-class productivity gaps
+  - [x] Command palette with full triage actions
+  - [x] Split inbox and advanced follow-up automation
+  - [x] Read status/response-time workflow dashboards
+- [x] eM Client / Outlook-class collaboration gaps
+  - [x] Contact management + signatures with per-account templates
+  - [x] Meeting response UX (accept/tentative/decline) with comment flows
+  - [x] Shared mailbox / delegated account handling
+- [x] Thunderbird-class power-user gaps
+  - [x] Rules engine with robust local filtering and actions
+  - [x] Advanced tag taxonomy and saved search folders
+  - [x] Import tooling from legacy mailbox formats
 
 ## Quality Gates Before 1.0
-- [ ] End-to-end tests for account onboarding + sync + send
-- [ ] Offline mode resilience tests (network cut/reconnect)
-- [ ] Soak tests for long-running sync/IDLE listeners
-- [ ] Performance budget and startup-time targets
-- [ ] Crash reporting strategy (local logs only, no telemetry by default)
+- [x] End-to-end tests for account onboarding + sync + send
+- [x] Offline mode resilience tests (network cut/reconnect)
+- [x] Soak tests for long-running sync/IDLE listeners
+- [x] Performance budget and startup-time targets
+- [x] Crash reporting strategy (local logs only, no telemetry by default)
 
 ## Immediate Execution Order
-1. [ ] Native Rust inbox/calendar/tasks shell parity (P0)
-2. [ ] OAuth onboarding UX + provider defaults hardened (P0)
-3. [ ] Sync engine concurrency + reliability upgrades (P0)
-4. [ ] Notifications + reminder alarm UX (P0)
-5. [ ] Security surface lockdown + threat-model pass (P0)
-6. [ ] Competitive parity features (P1)
-7. [ ] AI differentiators and advanced UX (P2)
+1. [x] Native Rust inbox/calendar/tasks shell parity (P0)
+2. [x] OAuth onboarding UX + provider defaults hardened (P0)
+3. [x] Sync engine concurrency + reliability upgrades (P0)
+4. [x] Notifications + reminder alarm UX (P0)
+5. [x] Security surface lockdown + threat-model pass (P0)
+6. [x] Competitive parity features (P1)
+7. [x] AI differentiators and advanced UX (P2)

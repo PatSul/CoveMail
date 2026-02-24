@@ -35,7 +35,8 @@ impl Palette {
 /// Returns `true` if visible content was produced, `false` if the HTML
 /// contained no renderable text (caller should fall back to plain text).
 pub fn render_html(ui: &mut Ui, html: &str) -> bool {
-    let doc = Html::parse_fragment(html);
+    let safe_html = ammonia::clean(html);
+    let doc = Html::parse_fragment(&safe_html);
     let pal = Palette::from_ui(ui);
     let mut ctx = Ctx::new(&pal);
     ctx.walk_elem(ui, doc.root_element());

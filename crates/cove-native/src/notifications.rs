@@ -192,6 +192,20 @@ impl NotificationState {
 
         count
     }
+
+    /// Notify about an actionable sync error.
+    pub fn notify_sync_error(&self, config: &NotificationConfig, error_msg: &str) {
+        if is_quiet_hours(config) {
+            return;
+        }
+
+        let _ = Notification::new()
+            .summary("Sync Error")
+            .body(error_msg)
+            .appname("Cove Mail")
+            .timeout(10000)
+            .show();
+    }
 }
 
 /// Check if current time falls within quiet hours.

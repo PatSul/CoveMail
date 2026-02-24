@@ -347,6 +347,14 @@ impl EmailService {
         Ok(self.storage.set_pinned(message_id, pinned).await?)
     }
 
+    pub async fn set_message_seen(
+        &self,
+        message_id: Uuid,
+        seen: bool,
+    ) -> Result<(), EmailError> {
+        Ok(self.storage.set_message_seen(message_id, seen).await?)
+    }
+
     pub async fn schedule_send(
         &self,
         message_id: Uuid,

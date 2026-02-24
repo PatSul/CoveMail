@@ -33,3 +33,4 @@ serde_json.workspace = true
 tokio.workspace = true
 url.workspace = true
 uuid.workspace = true
+ammonia.workspace = true

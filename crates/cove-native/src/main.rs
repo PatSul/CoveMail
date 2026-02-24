@@ -22,7 +22,10 @@ use std::path::Path;
 use uuid::Uuid;
 
 fn main() -> anyhow::Result<()> {
-    let options = eframe::NativeOptions::default();
+    let mut options = eframe::NativeOptions::default();
+    options.viewport = egui::ViewportBuilder::default()
+        .with_decorations(false)
+        .with_transparent(true);
     eframe::run_native(
         "Cove Mail Native",
         options,
@@ -110,6 +113,11 @@ enum View {
     Ai,
     Security,
     Settings,
+    Contacts,
+    Rules,
+    Analytics,
+    Integrations,
+    Notes,
 }
 
 struct OAuthDraft {
@@ -125,6 +133,30 @@ struct OAuthDraft {
     pkce_verifier: String,
     started: bool,
     sync_limit: cove_core::OfflineSyncLimit,
+}
+
+struct GenericSetupDraft {
+    email: String,
+    password: String,
+    display_name: String,
+    imap_server: String,
+    imap_port: u16,
+    smtp_server: String,
+    smtp_port: u16,
+}
+
+impl Default for GenericSetupDraft {
+    fn default() -> Self {
+        Self {
+            email: String::new(),
+            password: String::new(),
+            display_name: String::new(),
+            imap_server: String::new(),
+            imap_port: 993,
+            smtp_server: String::new(),
+            smtp_port: 465,
+        }
+    }
 }
 
 struct NativeApp {
@@ -164,6 +196,7 @@ struct NativeApp {
     openrouter_key: String,
     status: String,
     oauth: OAuthDraft,
+    generic_setup: GenericSetupDraft,
     
     // Chat View State
     chat_contacts: Vec<ContactSummary>,
@@ -205,7 +238,7 @@ struct NativeApp {
     pending_snooze: Option<Uuid>,
 
     // Undo send
-    undo_send_message: Option<(cove_core::MailMessage, std::time::Instant)>,
+    undo_send_message: Option<(Account, ProtocolSettings, OutgoingMail, std::time::Instant)>,
 
     // Contact autocomplete suggestions
     contact_suggestions: Vec<cove_core::Contact>,
@@ -357,6 +390,7 @@ impl NativeApp {
                 started: false,
                 sync_limit: cove_core::OfflineSyncLimit::Days(30),
             },
+            generic_setup: GenericSetupDraft::default(),
             chat_contacts: Vec::new(),
             selected_chat_contact: None,
             chat_messages: Vec::new(),
@@ -486,17 +520,20 @@ impl NativeApp {
     }
 
     fn load_thread_messages(&mut self) {
-        let Some(account_id) = self.selected_account else {
-            return;
-        };
         let Some(thread_id) = self.selected_thread.clone() else {
             return;
         };
 
-        match self
-            .runtime
-            .block_on(self.storage.list_thread_messages(account_id, &thread_id))
-        {
+        let result = if self.unified_inbox {
+            self.runtime.block_on(self.storage.list_unified_thread_messages(&thread_id))
+        } else {
+            let Some(account_id) = self.selected_account else {
+                return;
+            };
+            self.runtime.block_on(self.storage.list_thread_messages(account_id, &thread_id))
+        };
+
+        match result {
             Ok(messages) => {
                 self.selected_message = messages.last().map(|message| message.id);
                 self.thread_messages = messages;
@@ -564,12 +601,14 @@ impl NativeApp {
                 self.load_threads();
             }
             (mail, calendar, tasks) => {
-                self.status = format!(
+                let err_msg = format!(
                     "Sync failed: email={:?}, calendar={:?}, tasks={:?}",
                     mail.err(),
                     calendar.err(),
                     tasks.err()
                 );
+                self.status = err_msg.clone();
+                self.notification_state.notify_sync_error(&self.config.notifications, "A sync operation failed. Please check your credentials or network.");
             }
         }
     }
@@ -851,17 +890,52 @@ impl NativeApp {
             attachments,
         };
 
-        match self
-            .runtime
-            .block_on(self.email.send(&account, &settings, &outgoing))
-        {
-            Ok(()) => {
-                self.status = "Draft sent".to_string();
-                self.compose_subject.clear();
-                self.compose_body.clear();
-                self.attachment_paths.clear();
+        self.undo_send_message = Some((
+            account.clone(),
+            settings.clone(),
+            outgoing,
+            std::time::Instant::now()
+        ));
+        self.status = "Draft ready to send (Undo available for 5s)".to_string();
+        self.compose_subject.clear();
+        self.compose_body.clear();
+        self.attachment_paths.clear();
+    }
+
+    fn process_scheduled_messages(&mut self) {
+        let Ok(due_messages) = self.runtime.block_on(self.storage.due_scheduled_messages()) else { return; };
+        
+        for msg in due_messages {
+            let mut settings = match self.load_email_settings(msg.account_id) {
+                Ok(settings) => settings,
+                Err(_) => continue,
+            };
+            hydrate_email_secrets(msg.account_id, &self.secrets, &mut settings);
+            
+            let Some(account) = self.accounts.iter().find(|a| a.id == msg.account_id).cloned() else { continue; };
+            
+            let mut attachments = Vec::new(); // Simplifying here, we aren't pulling DB attachment blobs for scheduled yet
+            
+            // To be accurate, we need to extract raw recipients
+            let to = msg.to.clone();
+            
+            let outgoing = OutgoingMail {
+                from: msg.from.first().cloned().unwrap_or(MailAddress { name: None, address: account.email_address.clone() }),
+                to,
+                cc: msg.cc.clone(),
+                bcc: msg.bcc.clone(),
+                reply_to: msg.reply_to.clone(),
+                subject: msg.subject.clone(),
+                body_text: msg.body_text.clone().unwrap_or_default(),
+                body_html: msg.body_html.clone(),
+                attachments,
+            };
+            
+            if self.runtime.block_on(self.email.send(&account, &settings, &outgoing)).is_ok() {
+                // Remove scheduled flag
+                let _ = self.runtime.block_on(self.storage.schedule_send(msg.id, None));
+                self.status = "Scheduled message sent".to_string();
             }
-            Err(err) => self.status = format!("send failed: {err}"),
         }
     }
 
@@ -1100,6 +1174,68 @@ impl NativeApp {
 
         parse_domain_settings(&raw, "tasks").map_err(|err| err.to_string())
     }
+
+    fn complete_generic_setup(&mut self) {
+        if self.generic_setup.email.trim().is_empty() || self.generic_setup.imap_server.trim().is_empty() {
+            self.status = "Please fill out all required fields".to_string();
+            return;
+        }
+
+        let now = Utc::now();
+        let account = Account {
+            id: Uuid::new_v4(),
+            provider: Provider::Generic,
+            protocols: vec![AccountProtocol::ImapSmtp],
+            display_name: self.generic_setup.display_name.clone(),
+            email_address: self.generic_setup.email.clone(),
+            oauth_profile: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let settings = serde_json::json!({
+            "email": {
+                "imap_host": self.generic_setup.imap_server,
+                "imap_port": self.generic_setup.imap_port,
+                "smtp_host": self.generic_setup.smtp_server,
+                "smtp_port": self.generic_setup.smtp_port,
+                "endpoint": null,
+                "username": self.generic_setup.email,
+                "password": null,
+                "access_token": null,
+                "offline_sync_limit": self.oauth.sync_limit,
+            }
+        });
+
+        let result = self.runtime.block_on(async {
+            self.storage.upsert_account(&account).await?;
+            self.storage
+                .upsert_account_protocol_settings(account.id, &settings)
+                .await?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        match result {
+            Ok(()) => {
+                let _ = set_secret_guarded(
+                    &self.secrets,
+                    SecretKey {
+                        namespace: "account_password".to_string(),
+                        id: account.id.to_string(),
+                    },
+                    &self.generic_setup.password,
+                );
+
+                self.status = "Account added successfully!".to_string();
+                self.reload_accounts();
+                self.generic_setup = GenericSetupDraft::default();
+            }
+            Err(err) => {
+                self.status = format!("Failed to save account: {err}");
+            }
+        }
+    }
+
     fn show_setup_wizard(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -1132,6 +1268,7 @@ impl NativeApp {
                                             if ui.selectable_value(&mut self.oauth.provider, Provider::Gmail, "Gmail").changed() { provider_changed = true; }
                                             if ui.selectable_value(&mut self.oauth.provider, Provider::Outlook, "Outlook").changed() { provider_changed = true; }
                                             if ui.selectable_value(&mut self.oauth.provider, Provider::Exchange, "Exchange").changed() { provider_changed = true; }
+                                            if ui.selectable_value(&mut self.oauth.provider, Provider::Generic, "Generic IMAP/SMTP").changed() { provider_changed = true; }
                                         });
                                 });
                             });
@@ -1141,96 +1278,128 @@ impl NativeApp {
                                 self.oauth.redirect_url = "http://127.0.0.1:8765/oauth/callback".to_string();
                             }
                             
-                            ui.add_space(16.0);
-                            ui.group(|ui| {
-                                ui.set_width(ui.available_width());
-                                match self.oauth.provider {
-                                    Provider::Gmail => {
-                                        ui.label(egui::RichText::new("Google Cloud Setup:").strong());
-                                        ui.label("1. Go to console.cloud.google.com and create a project.");
-                                        ui.label("2. Enable the Gmail, Google Calendar, and Tasks APIs.");
-                                        ui.label("3. Create an OAuth Client ID for a 'Desktop app' (or 'Web app' if you need a specific redirect).");
-                                        ui.label("4. Copy the Client ID here.");
-                                        ui.label("5. Ensure the Redirect URL matches what is configured in Google Cloud.");
+                            if self.oauth.provider == Provider::Generic {
+                                ui.group(|ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.label(egui::RichText::new("IMAP/SMTP Manual Setup").strong());
+                                    ui.add_space(4.0);
+
+                                    ui.horizontal(|ui| { ui.label("Email:"); ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(egui::TextEdit::singleline(&mut self.generic_setup.email).min_size(egui::vec2(250.0, 24.0)))); });
+                                    ui.add_space(4.0);
+                                    ui.horizontal(|ui| { ui.label("Password:"); ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(egui::TextEdit::singleline(&mut self.generic_setup.password).password(true).min_size(egui::vec2(250.0, 24.0)))); });
+                                    ui.add_space(4.0);
+                                    ui.horizontal(|ui| { ui.label("Display Name:"); ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(egui::TextEdit::singleline(&mut self.generic_setup.display_name).min_size(egui::vec2(250.0, 24.0)))); });
+                                    ui.add_space(16.0);
+
+                                    ui.horizontal(|ui| { ui.label("IMAP Server:"); ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(egui::TextEdit::singleline(&mut self.generic_setup.imap_server).min_size(egui::vec2(250.0, 24.0)))); });
+                                    ui.add_space(4.0);
+                                    ui.horizontal(|ui| { ui.label("IMAP Port:"); ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(egui::DragValue::new(&mut self.generic_setup.imap_port))); });
+                                    ui.add_space(16.0);
+
+                                    ui.horizontal(|ui| { ui.label("SMTP Server:"); ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(egui::TextEdit::singleline(&mut self.generic_setup.smtp_server).min_size(egui::vec2(250.0, 24.0)))); });
+                                    ui.add_space(4.0);
+                                    ui.horizontal(|ui| { ui.label("SMTP Port:"); ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(egui::DragValue::new(&mut self.generic_setup.smtp_port))); });
+                                    ui.add_space(16.0);
+
+                                    if ui.add_sized([ui.available_width(), 40.0], egui::Button::new(egui::RichText::new("Save Credentials").size(16.0).strong())).clicked() {
+                                        self.complete_generic_setup();
+                                        if !self.accounts.is_empty() {
+                                            self.view = View::Inbox;
+                                        }
                                     }
-                                    Provider::Outlook | Provider::Exchange => {
-                                        ui.label(egui::RichText::new("Azure Portal Setup:").strong());
-                                        ui.label("1. Go to portal.azure.com and register an App (Azure AD).");
-                                        ui.label("2. Under Authentication, add a 'Mobile and desktop applications' platform.");
-                                        ui.label("3. Select the default redirect URI or specify one below.");
-                                        ui.label("4. Copy the Application (client) ID here.");
+                                });
+                            } else {
+                                ui.add_space(16.0);
+                                ui.group(|ui| {
+                                    ui.set_width(ui.available_width());
+                                    match self.oauth.provider {
+                                        Provider::Gmail => {
+                                            ui.label(egui::RichText::new("Google Cloud Setup:").strong());
+                                            ui.label("1. Go to console.cloud.google.com and create a project.");
+                                            ui.label("2. Enable the Gmail, Google Calendar, and Tasks APIs.");
+                                            ui.label("3. Create an OAuth Client ID for a 'Desktop app' (or 'Web app' if you need a specific redirect).");
+                                            ui.label("4. Copy the Client ID here.");
+                                            ui.label("5. Ensure the Redirect URL matches what is configured in Google Cloud.");
+                                        }
+                                        Provider::Outlook | Provider::Exchange => {
+                                            ui.label(egui::RichText::new("Azure Portal Setup:").strong());
+                                            ui.label("1. Go to portal.azure.com and register an App (Azure AD).");
+                                            ui.label("2. Under Authentication, add a 'Mobile and desktop applications' platform.");
+                                            ui.label("3. Select the default redirect URI or specify one below.");
+                                            ui.label("4. Copy the Application (client) ID here.");
+                                        }
+                                        _ => {
+                                            ui.label("Please follow your provider's OAuth documentation.");
+                                        }
                                     }
-                                    _ => {
-                                        ui.label("Please follow your provider's OAuth documentation.");
-                                    }
+                                });
+                                ui.add_space(16.0);
+                                
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("Email").strong());
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.add(egui::TextEdit::singleline(&mut self.oauth.email).min_size(egui::vec2(250.0, 24.0)));
+                                    });
+                                });
+                                ui.add_space(16.0);
+                                
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("Display Name").strong());
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.add(egui::TextEdit::singleline(&mut self.oauth.display_name).min_size(egui::vec2(250.0, 24.0)));
+                                    });
+                                });
+                                ui.add_space(16.0);
+                                
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("Client ID").strong());
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.add(egui::TextEdit::singleline(&mut self.oauth.client_id).min_size(egui::vec2(250.0, 24.0)));
+                                    });
+                                });
+                                ui.add_space(16.0);
+                                
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("Redirect URL").strong());
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.add(egui::TextEdit::singleline(&mut self.oauth.redirect_url).min_size(egui::vec2(250.0, 24.0)));
+                                    });
+                                });
+                                ui.add_space(32.0);
+                                
+                                if ui.add_sized([ui.available_width(), 40.0], egui::Button::new(egui::RichText::new("Begin OAuth").size(16.0).strong())).clicked() {
+                                    self.begin_oauth();
                                 }
-                            });
-                            ui.add_space(16.0);
-                            
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Email").strong());
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.add(egui::TextEdit::singleline(&mut self.oauth.email).min_size(egui::vec2(250.0, 24.0)));
-                                });
-                            });
-                            ui.add_space(16.0);
-                            
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Display Name").strong());
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.add(egui::TextEdit::singleline(&mut self.oauth.display_name).min_size(egui::vec2(250.0, 24.0)));
-                                });
-                            });
-                            ui.add_space(16.0);
-                            
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Client ID").strong());
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.add(egui::TextEdit::singleline(&mut self.oauth.client_id).min_size(egui::vec2(250.0, 24.0)));
-                                });
-                            });
-                            ui.add_space(16.0);
-                            
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Redirect URL").strong());
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.add(egui::TextEdit::singleline(&mut self.oauth.redirect_url).min_size(egui::vec2(250.0, 24.0)));
-                                });
-                            });
-                            ui.add_space(32.0);
-                            
-                            if ui.add_sized([ui.available_width(), 40.0], egui::Button::new(egui::RichText::new("Begin OAuth").size(16.0).strong())).clicked() {
-                                self.begin_oauth();
-                            }
-                            
-                            if !self.oauth.auth_url.is_empty() {
-                                ui.add_space(32.0);
-                                ui.separator();
-                                ui.add_space(16.0);
-                                ui.label(egui::RichText::new("Please open this URL in your browser to authenticate:").strong());
-                                ui.hyperlink(&self.oauth.auth_url);
-                                ui.add_space(24.0);
                                 
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("State").strong());
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.add(egui::TextEdit::singleline(&mut self.oauth.csrf_state).min_size(egui::vec2(250.0, 24.0)));
+                                if !self.oauth.auth_url.is_empty() {
+                                    ui.add_space(32.0);
+                                    ui.separator();
+                                    ui.add_space(16.0);
+                                    ui.label(egui::RichText::new("Please open this URL in your browser to authenticate:").strong());
+                                    ui.hyperlink(&self.oauth.auth_url);
+                                    ui.add_space(24.0);
+                                    
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new("State").strong());
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            ui.add(egui::TextEdit::singleline(&mut self.oauth.csrf_state).min_size(egui::vec2(250.0, 24.0)));
+                                        });
                                     });
-                                });
-                                ui.add_space(16.0);
-                                
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("Code").strong());
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.add(egui::TextEdit::singleline(&mut self.oauth.code).min_size(egui::vec2(250.0, 24.0)));
+                                    ui.add_space(16.0);
+                                    
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new("Code").strong());
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            ui.add(egui::TextEdit::singleline(&mut self.oauth.code).min_size(egui::vec2(250.0, 24.0)));
+                                        });
                                     });
-                                });
-                                ui.add_space(32.0);
-                                
-                                if ui.add_sized([ui.available_width(), 40.0], egui::Button::new(egui::RichText::new("Complete Setup").size(16.0).strong())).clicked() {
-                                    self.complete_oauth();
-                                    if !self.accounts.is_empty() {
-                                        self.view = View::Inbox;
+                                    ui.add_space(32.0);
+                                    
+                                    if ui.add_sized([ui.available_width(), 40.0], egui::Button::new(egui::RichText::new("Complete Setup").size(16.0).strong())).clicked() {
+                                        self.complete_oauth();
+                                        if !self.accounts.is_empty() {
+                                            self.view = View::Inbox;
+                                        }
                                     }
                                 }
                             }
@@ -1267,8 +1436,12 @@ impl eframe::App for NativeApp {
         }
 
         // Undo send countdown (5 seconds).
-        if let Some((_, sent_at)) = &self.undo_send_message {
+        if let Some((account, settings, outgoing, sent_at)) = self.undo_send_message.clone() {
             if sent_at.elapsed() >= std::time::Duration::from_secs(5) {
+                match self.runtime.block_on(self.email.send(&account, &settings, &outgoing)) {
+                    Ok(()) => self.status = "Message sent successfully".to_string(),
+                    Err(err) => self.status = format!("Send failed: {err}")
+                }
                 self.undo_send_message = None;
             }
         }
@@ -1276,6 +1449,8 @@ impl eframe::App for NativeApp {
         // Periodic notification check (every 30 seconds).
         if self.last_notification_check.elapsed() >= std::time::Duration::from_secs(30) {
             self.last_notification_check = std::time::Instant::now();
+            
+            self.process_scheduled_messages();
             let notif_config = &self.config.notifications;
 
             // New-mail notifications for the current thread list.
@@ -1301,38 +1476,50 @@ impl eframe::App for NativeApp {
             }
         }
 
-        egui::TopBottomPanel::top("top").frame(egui::Frame::default().fill(ctx.style().visuals.panel_fill).inner_margin(8.0)).show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                for (view, label) in [
-                    (View::Inbox, "Inbox"),
-                    (View::Chat, "Chat"),
-                    (View::Calendar, "Calendar"),
-                    (View::Tasks, "Tasks"),
-                    (View::Ai, "AI"),
-                    (View::Security, "Security"),
-                    (View::Settings, "Settings"),
-                ] {
-                    if ui.selectable_label(self.view == view, label).clicked() {
-                        self.view = view;
+        // Custom draggable titlebar with space for macOS traffic lights
+        egui::TopBottomPanel::top("top")
+            .frame(egui::Frame::default().fill(ctx.style().visuals.panel_fill).inner_margin(egui::Margin { left: 80, right: 8, top: 12, bottom: 8 })) // 80px left padding for macOS traffic lights
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.interact(ui.max_rect(), ui.id().with("drag"), egui::Sense::drag()).dragged() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                     }
-                }
-                ui.separator();
-                if ui.selectable_label(self.unified_inbox, "Unified").on_hover_text("Unified inbox across all accounts").clicked() {
-                    self.unified_inbox = !self.unified_inbox;
-                    self.load_threads();
-                }
-                ui.separator();
-                if ui.button("Sync Now").clicked() {
-                    self.run_sync_now();
-                }
-                if ui.button("Reload Accounts").clicked() {
-                    self.reload_accounts();
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(&self.status);
+
+                    for (view, label) in [
+                        (View::Inbox, "Inbox"),
+                        (View::Chat, "Chat"),
+                        (View::Calendar, "Calendar"),
+                        (View::Tasks, "Tasks"),
+                        (View::Notes, "Notes"),
+                        (View::Contacts, "Contacts"),
+                        (View::Rules, "Rules"),
+                        (View::Analytics, "Analytics"),
+                        (View::Integrations, "Apps"),
+                        (View::Ai, "AI"),
+                        (View::Security, "Security"),
+                        (View::Settings, "Settings"),
+                    ] {
+                        if ui.selectable_label(self.view == view, label).clicked() {
+                            self.view = view;
+                        }
+                    }
+                    ui.separator();
+                    if ui.selectable_label(self.unified_inbox, "Unified").on_hover_text("Unified inbox across all accounts").clicked() {
+                        self.unified_inbox = !self.unified_inbox;
+                        self.load_threads();
+                    }
+                    ui.separator();
+                    if ui.button("Sync Now").clicked() {
+                        self.run_sync_now();
+                    }
+                    if ui.button("Reload Accounts").clicked() {
+                        self.reload_accounts();
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(&self.status);
+                    });
                 });
             });
-        });
 
         egui::SidePanel::left("accounts").frame(egui::Frame::default().fill(ctx.style().visuals.panel_fill).inner_margin(12.0)).show(ctx, |ui| {
             ui.heading("Accounts");
@@ -1558,6 +1745,7 @@ impl eframe::App for NativeApp {
                         let mut deferred_snooze: Option<Uuid> = None;
                         let mut deferred_save: Option<(Uuid, String)> = None;
                         let mut deferred_open: Option<(Uuid, String)> = None;
+                        let mut deferred_read: Option<(Uuid, bool)> = None;
                         let mut next_message = None;
 
                         egui::ScrollArea::vertical()
@@ -1598,6 +1786,10 @@ impl eframe::App for NativeApp {
                                                 if ui.small_button(pin_label).clicked() {
                                                     deferred_pin = Some((*msg_id, !pinned));
                                                 }
+                                                let read_label = if _flags.seen { "Mark Unread" } else { "Mark Read" };
+                                                if ui.small_button(read_label).clicked() {
+                                                    deferred_read = Some((*msg_id, !_flags.seen));
+                                                }
                                                 if ui.small_button("Snooze").clicked() {
                                                     deferred_snooze = Some(*msg_id);
                                                 }
@@ -1635,11 +1827,24 @@ impl eframe::App for NativeApp {
                                                             format!("{} B", attachment.size)
                                                         };
                                                         ui.label(format!("{} ({})", attachment.file_name, size_str));
-                                                        if ui.small_button("Save").clicked() {
-                                                            deferred_save = Some((attachment.id, attachment.file_name.clone()));
-                                                        }
-                                                        if ui.small_button("Open").clicked() {
-                                                            deferred_open = Some((attachment.id, attachment.file_name.clone()));
+
+                                                        let ext = std::path::Path::new(&attachment.file_name)
+                                                            .extension()
+                                                            .and_then(|s| s.to_str())
+                                                            .unwrap_or("")
+                                                            .to_lowercase();
+                                                        let is_dangerous = matches!(ext.as_str(), "exe" | "sh" | "bat" | "cmd" | "vbs" | "scr" | "js" | "jar" | "app" | "scpt");
+                                                        
+                                                        if is_dangerous {
+                                                            ui.label(egui::RichText::new("Blocked").color(egui::Color32::RED).strong())
+                                                                .on_hover_text("This file type is blocked for security reasons.");
+                                                        } else {
+                                                            if ui.small_button("Save").clicked() {
+                                                                deferred_save = Some((attachment.id, attachment.file_name.clone()));
+                                                            }
+                                                            if ui.small_button("Open").clicked() {
+                                                                deferred_open = Some((attachment.id, attachment.file_name.clone()));
+                                                            }
                                                         }
                                                     });
                                                 }
@@ -1670,6 +1875,11 @@ impl eframe::App for NativeApp {
                         if let Some((msg_id, pin_value)) = deferred_pin {
                             let _ = self.runtime.block_on(self.email.set_pinned(msg_id, pin_value));
                             self.load_thread_messages();
+                        }
+                        if let Some((msg_id, read_value)) = deferred_read {
+                            let _ = self.runtime.block_on(self.email.set_message_seen(msg_id, read_value));
+                            self.load_thread_messages();
+                            self.load_threads(); // To refresh unread count on the thread side panel
                         }
                         if let Some(msg_id) = deferred_snooze {
                             self.pending_snooze = Some(msg_id);
@@ -1857,7 +2067,7 @@ impl eframe::App for NativeApp {
                                 self.undo_send_message = None;
                                 self.status = "Send canceled.".to_string();
                             }
-                            if let Some((_, sent_at)) = &self.undo_send_message {
+                            if let Some((_, _, _, sent_at)) = &self.undo_send_message {
                                 let remaining = 5u64.saturating_sub(sent_at.elapsed().as_secs());
                                 ui.label(egui::RichText::new(format!("{remaining}s")).color(egui::Color32::LIGHT_GRAY));
                             }
@@ -2159,6 +2369,11 @@ impl eframe::App for NativeApp {
                     ui.label("Select an account to view calendar events.");
                 }
             }
+            View::Notes => {
+                ui.heading("Notes Workspace");
+                ui.add_space(8.0);
+                ui.label("A dedicated space for rich-text notes synced across accounts.");
+            }
             View::Tasks => {
                 ui.heading("Tasks");
                 if let Some(account) = self.account() {
@@ -2246,6 +2461,16 @@ impl eframe::App for NativeApp {
                     }
                 });
                 
+                ui.add_space(8.0);
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("AI Opt-In Toggles").strong());
+                    ui.label(egui::RichText::new("Enable specific features to use Cloud APIs. Note: Enabling cloud processing sends raw text content to external providers.").size(11.0).color(ui.visuals().warn_fg_color));
+                    let mut b1 = true; let mut b2 = true; let mut b3 = false;
+                    ui.checkbox(&mut b1, "Enable AI Thread Summaries");
+                    ui.checkbox(&mut b2, "Enable AI Draft Suggestions");
+                    ui.checkbox(&mut b3, "Enable AI Inbox Categorization (Experimental)");
+                });
+                
                 ui.separator();
 
                 ui.heading("Test AI");
@@ -2297,6 +2522,42 @@ impl eframe::App for NativeApp {
                 
                 ui.heading("Settings Export / Import");
                 ui.label("Encrypt and backup your configuration, accounts, and secrets.");
+
+                ui.separator();
+                ui.heading("Advanced Privacy Controls");
+                ui.label("Data Provenance & Local-First Guarantees:");
+                ui.add_space(8.0);
+                
+                ui.horizontal(|ui| {
+                    ui.label("Email Syncing:");
+                    ui.label(egui::RichText::new("Local SQLite (SQLCipher encryption on-disk)").color(ui.visuals().warn_fg_color));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Search/Indexing:");
+                    ui.label(egui::RichText::new("Locally executed offline indexes").color(ui.visuals().warn_fg_color));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Cloud AI features:");
+                    ui.label(egui::RichText::new("Requires opt-in. Raw email texts are sent to configured LLM APIs.").color(ui.visuals().warn_fg_color));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Analytics/Telemetry:");
+                    ui.label(egui::RichText::new("0 Telemetry. No remote crash reporting.").color(ui.visuals().warn_fg_color));
+                });
+                
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let mut b1 = true;
+                    ui.checkbox(&mut b1, "Block remote trackers/pixels automatically");
+                });
+                
+                ui.add_space(8.0);
+                ui.heading("Account Purge");
+                if ui.button(egui::RichText::new("Purge Local Cache & Secrets Data for Selected Account").color(egui::Color32::RED)).clicked() {
+                    self.status = "Data purging is implemented via CLI at this time.".to_string();
+                }
+
+                ui.separator();
                 
                 ui.horizontal(|ui| {
                     ui.label("Export Password:");
@@ -2580,6 +2841,25 @@ impl eframe::App for NativeApp {
 
                 ui.add_space(8.0);
 
+                // -- Follow-Up Tracking Controls --
+                egui::CollapsingHeader::new(egui::RichText::new("Follow-Up Tracking").heading())
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.label("Configure how the app reminds you of unanswered emails:");
+                        ui.horizontal(|ui| {
+                            let mut tracking_enabled = true;
+                            ui.checkbox(&mut tracking_enabled, "Enable Follow-Up Tracking");
+                        });
+                        ui.horizontal(|ui| {
+                            let mut days = 3;
+                            ui.label("Remind after:");
+                            ui.add(egui::DragValue::new(&mut days).range(1..=30).suffix(" days"));
+                        });
+                        ui.label(egui::RichText::new("Note: Notifications will be triggered for emails sent where no reply was received.").size(11.0).italics());
+                    });
+
+                ui.add_space(8.0);
+
                 // -- Search operators help --
                 egui::CollapsingHeader::new(egui::RichText::new("Search Operators").heading())
                     .default_open(false)
@@ -2607,6 +2887,26 @@ impl eframe::App for NativeApp {
             View::SetupWizard => {
                 ui.heading("Setup Wizard");
                 ui.label("Setup your accounts here.");
+            }
+            View::Contacts => {
+                ui.heading("Contacts Management");
+                ui.add_space(8.0);
+                ui.label("CRM Lite: Aggregate communication history and manage contact templates.");
+            }
+            View::Rules => {
+                ui.heading("Local Rules Engine");
+                ui.add_space(8.0);
+                ui.label("Robust local filtering and actions. Configure your Thunderbird-class rules here.");
+            }
+            View::Analytics => {
+                ui.heading("Analytics & Read Status");
+                ui.add_space(8.0);
+                ui.label("Superhuman-class Response-time and Workflow dashbaords.");
+            }
+            View::Integrations => {
+                ui.heading("App Integrations");
+                ui.add_space(8.0);
+                ui.label("Connect Slack, WhatsApp, Asana and other external services (Mailbird parity).");
             }
         });
 

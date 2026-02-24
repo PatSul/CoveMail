@@ -431,7 +431,23 @@ impl Storage {
         .bind(thread_id)
         .fetch_all(&self.pool)
         .await?;
+        rows.into_iter().map(Self::row_to_mail_message).collect()
+    }
 
+    pub async fn list_unified_thread_messages(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<cove_core::MailMessage>, StorageError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT * FROM mail_messages
+            WHERE thread_id = ?1
+            ORDER BY received_at ASC
+            "#,
+        )
+        .bind(thread_id)
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter().map(Self::row_to_mail_message).collect()
     }
 
@@ -561,6 +577,19 @@ impl Storage {
     ) -> Result<(), StorageError> {
         sqlx::query("UPDATE mail_messages SET pinned = ?1 WHERE id = ?2")
             .bind(pinned as i32)
+            .bind(message_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_message_seen(
+        &self,
+        message_id: Uuid,
+        seen: bool,
+    ) -> Result<(), StorageError> {
+        sqlx::query("UPDATE mail_messages SET flags_seen = ?1 WHERE id = ?2")
+            .bind(seen as i32)
             .bind(message_id.to_string())
             .execute(&self.pool)
             .await?;

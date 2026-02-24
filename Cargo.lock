@@ -1286,6 +1286,7 @@ name = "cove-native"
 version = "0.1.0"
 dependencies = [
  "age",
+ "ammonia",
  "anyhow",
  "base64 0.22.1",
  "chrono",
